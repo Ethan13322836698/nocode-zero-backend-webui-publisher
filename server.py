@@ -235,6 +235,47 @@ def git_status():
     }
 
 
+def _host_from_url(url):
+    """从 https://host/... 或 git@host:... 里取出 host。"""
+    url = (url or "").strip()
+    if url.startswith("git@"):
+        try:
+            return url.split("@", 1)[1].split(":", 1)[0]
+        except Exception:
+            return "github.com"
+    try:
+        return urllib.parse.urlparse(url).hostname or "github.com"
+    except Exception:
+        return "github.com"
+
+
+def git_store_credentials(user, token, remote_url):
+    """把 HTTPS 凭据存入系统凭据管理器 / 本地凭据存储. 不写明文入库."""
+    if not user or not token:
+        return False, "用户名或 Token 为空"
+    host = _host_from_url(remote_url)
+    # 若本机没有任何 credential helper, 用 store (写入 .git-credentials, 已 gitignore)
+    if not _has_credential_helper():
+        run_git(["config", "--local", "credential.helper", "store"])
+    payload = "protocol=https\nhost=%s\nusername=%s\npassword=%s\n\n" % (
+        host, user.replace("\n", ""), token.replace("\n", ""))
+    try:
+        p = subprocess.run(
+            ["git", "credential", "approve"],
+            cwd=HERE, input=payload.encode("utf-8"),
+            capture_output=True, timeout=20)
+        if p.returncode != 0:
+            return False, (p.stderr or "").strip() or "credential helper 失败"
+        return True, "已保存凭据 (%s)，后续推送自动使用" % host
+    except Exception as e:
+        return False, str(e)
+
+
+def _has_credential_helper():
+    ok, out = run_git(["config", "--get-regexp", "credential.helper"])
+    return ok and out.strip() != ""
+
+
 def esc(s):
     """转义 HTML 且保留换行, 防止 XSS。"""
     return html.escape(s or "")
@@ -447,6 +488,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_settings_save()
         elif path == "/api/git/setup":
             self._handle_git_setup()
+        elif path == "/api/git/auth":
+            self._handle_git_auth()
         elif path == "/api/git/push":
             self._handle_git_push()
         elif path == "/api/git/set-url":
@@ -464,8 +507,23 @@ class Handler(BaseHTTPRequestHandler):
         ok, msg = git_commit_push("manual publish")
         self._json(200 if ok else 400, {"ok": ok, "msg": msg})
 
+    def _handle_git_auth(self):
+        """保存 HTTPS 凭据到系统凭据管理器 (不写明文入库)。"""
+        try:
+            body = json.loads(self._read_body().decode("utf-8") or "{}")
+            user = (body.get("user") or "").strip()
+            token = (body.get("pass") or "").strip()
+            remote_url = (body.get("remote_url") or "").strip()
+            if not user or not token:
+                self._json(400, {"ok": False, "error": "缺少用户名或 Token"})
+                return
+            ok, msg = git_store_credentials(user, token, remote_url)
+            self._json(200 if ok else 400, {"ok": ok, "msg": msg, "error": msg if not ok else ""})
+        except Exception as e:
+            self._json(400, {"ok": False, "error": str(e)})
+
     def _handle_git_setup(self):
-        """执行 setup 里的 git 任务: 关联 remote 并首次 push。"""
+        """执行 setup 里的 git 任务: (可选存凭据) 关联 remote。"""
         try:
             body = json.loads(self._read_body().decode("utf-8") or "{}")
             remote_url = (body.get("remote_url") or "").strip()
@@ -473,6 +531,13 @@ class Handler(BaseHTTPRequestHandler):
             if not remote_url:
                 self._json(400, {"ok": False, "error": "缺少远程仓库地址"})
                 return
+            # 0) 若提供了 user/pass 且是 HTTPS, 先存凭据
+            user = (body.get("user") or "").strip()
+            token = (body.get("pass") or "").strip()
+            cred_note = ""
+            if user and token and remote_url.startswith("https://"):
+                okc, msgc = git_store_credentials(user, token, remote_url)
+                cred_note = ("凭据: " + msgc + "; ") if okc else "凭据未保存: " + msgc + "; "
             # 1) 关联 remote
             ok, _ = run_git(["remote", "add", "origin", remote_url])
             if not ok:
@@ -481,7 +546,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not ok:
                     self._json(400, {"ok": False, "error": "设置 remote 失败: " + out})
                     return
-            self._json(200, {"ok": True, "remote_url": remote_url, "branch": branch})
+            self._json(200, {"ok": True, "remote_url": remote_url, "branch": branch, "cred": cred_note})
         except Exception as e:
             self._json(400, {"ok": False, "error": str(e)})
 
@@ -629,6 +694,18 @@ SETUP_TEMPLATE = '''<!DOCTYPE html>
     <input type="text" id="remote_url" placeholder="https://github.com/用户名/仓库名.git  或  git@github.com:用户名/仓库名.git">
     <p class="hint">先去 GitHub 新建一个空仓库，把它的 HTTPS 或 SSH 地址粘贴到这里。</p>
 
+    <!-- 认证方式(根据地址自动切换) -->
+    <div id="authBlock" style="display:none;margin-top:16px;border:1px dashed var(--ink);padding:14px">
+      <div class="step" style="margin-bottom:8px">远程仓库认证</div>
+      <label id="authModeLabel">HTTPS 需要用户名 + Token 才能推送</label>
+      <input type="text" id="auth_user" placeholder="GitHub 用户名">
+      <input type="password" id="auth_token" placeholder="Personal Access Token (PAT)" style="margin-top:10px">
+      <p class="hint">GitHub 已不支持密码推送，请用 Personal Access Token（Settings → Developer settings → Personal access tokens，勾选 <b>repo</b> 权限）。凭据会安全存入系统凭据管理器，下次自动记住。</p>
+      <div class="setup-actions">
+        <button class="btn" id="btnAuth">验证并保存凭据</button>
+      </div>
+    </div>
+
     <div class="setup-actions">
       <button class="btn" id="btnConnect">连接仓库</button>
       <button class="btn" id="btnPush" disabled>推送发布内容</button>
@@ -651,12 +728,46 @@ const $ = id => document.getElementById(id);
 function log(msg){ $('log').textContent = msg; }
 const btnC=$('btnConnect'), btnP=$('btnPush'), btnF=$('btnFinish');
 
+// 根据地址自动判断认证方式
+$('remote_url').addEventListener('input', () => {
+  const url = $('remote_url').value.trim();
+  const auth = $('authBlock');
+  if (url.startsWith('https://')) {
+    auth.style.display = 'block';
+    $('authModeLabel').textContent = 'HTTPS 需要用户名 + Token 才能推送';
+  } else if (url.startsWith('git@') || url.startsWith('ssh')) {
+    auth.style.display = 'block';
+    $('authModeLabel').textContent = 'SSH 方式：使用本机 SSH key，无需在浏览器填用户名/密码';
+    // SSH 不需要 token 输入, 但保留提示
+  } else if (url) {
+    auth.style.display = 'block';
+    $('authModeLabel').textContent = '未知协议，请确认地址是否为 https:// 或 git@ssh';
+  } else {
+    auth.style.display = 'none';
+  }
+});
+
+// 验证并保存凭据(存入系统凭据管理器)
+$('btnAuth').onclick = async () => {
+  const url = $('remote_url').value.trim();
+  const user = $('auth_user').value.trim();
+  const token = $('auth_token').value.trim();
+  if(!url || !user || !token){ log('请填写 用户名 + Token（SSH 方式则无需填写，直接连接即可）'); return; }
+  log('正在保存凭据到系统…');
+  try{
+    const r = await fetch('/api/git/auth',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({remote_url:url,user:user,pass:token})});
+    const j = await r.json();
+    if(!j.ok){ log('凭据保存失败: '+(j.error||'')); return; }
+    log('✓ 凭据已保存（SSH 方式可跳过此步）。现在点「连接仓库」。');
+  }catch(e){ log('保存出错: '+e.message); }
+};
+
 btnC.onclick = async () => {
   const url = $('remote_url').value.trim();
   if(!url){ log('请先粘贴远程仓库地址'); return; }
   log('正在关联远程仓库…');
   try{
-    const r = await fetch('/api/git/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({remote_url:url,branch:'main'})});
+    const r = await fetch('/api/git/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({remote_url:url,branch:'main',user:$('auth_user').value.trim(),pass:$('auth_token').value.trim()})});
     const j = await r.json();
     if(!j.ok){ log('失败: '+(j.error||'')); return; }
     log('已关联远程仓库: '+j.remote_url);

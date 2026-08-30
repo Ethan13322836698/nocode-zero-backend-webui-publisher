@@ -1,6 +1,7 @@
 # 运行时本地配置(每台机器/每个用户不同, 不提交)
 site.json
 setup.json
+.git-credentials
 
 # Python 缓存
 __pycache__/
