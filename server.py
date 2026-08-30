@@ -218,6 +218,37 @@ def git_commit_push(message):
     return True, "已 commit (未 push): " + message
 
 
+# 后台异步发布: 记录最近一次结果, 供前端轮询展示
+_last_push = {"running": False, "ts": 0, "ok": None, "msg": ""}
+_push_lock = threading.Lock()
+
+
+def start_async_push(message):
+    """在后台线程执行 git_commit_push, 立即返回状态."""
+    global _last_push
+    with _push_lock:
+        if _last_push.get("running"):
+            return False, "已有发布任务进行中, 请稍候"
+        _last_push = {"running": True, "ts": int(time.time()), "ok": None, "msg": "发布中…"}
+    def _run():
+        try:
+            ok, msg = git_commit_push(message)
+        except Exception as e:
+            ok, msg = False, "发布出错: " + str(e)
+        with _push_lock:
+            _last_push["running"] = False
+            _last_push["ok"] = ok
+            _last_push["msg"] = msg
+    threading.Thread(target=_run, daemon=True).start()
+    return True, "已开始发布(后台执行), 稍后刷新即可看到结果"
+
+
+def push_status():
+    """返回后台发布任务状态."""
+    with _push_lock:
+        return dict(_last_push)
+
+
 def git_status():
     """返回 git 环境信息, 供 setup/设置页展示。"""
     g = load_git()
@@ -414,12 +445,19 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body=b"", ctype="text/html; charset=utf-8"):
         if isinstance(body, str):
             body = body.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # 客户端提前断开(如浏览器关闭/超时), 不报吓人的错
+            self.close_connection = True
+        except Exception:
+            pass
 
     def _json(self, code, obj):
         self._send(code, json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8")
@@ -454,7 +492,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/settings":
             self._json(200, load_site())
         elif path == "/api/git/status":
-            self._json(200, git_status())
+            st = git_status()
+            st["push"] = push_status()
+            self._json(200, st)
         elif path.startswith("/images/"):
             self._serve_image(path)
         else:
@@ -503,8 +543,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- Git 发布 & Setup ----
     def _handle_git_push(self):
-        """立即执行一次自动提交推送。"""
-        ok, msg = git_commit_push("manual publish")
+        """触发后台异步发布, 立即返回, 不阻塞浏览器(避免超时/断连)。"""
+        ok, msg = start_async_push("manual publish")
         self._json(200 if ok else 400, {"ok": ok, "msg": msg})
 
     def _handle_git_auth(self):
@@ -602,8 +642,8 @@ class Handler(BaseHTTPRequestHandler):
             # 同时覆盖 index.html 让设置生效
             with open(INDEX_FILE, "w", encoding="utf-8") as f:
                 f.write(render_index(load_products()))
-            gok, gout = git_commit_push("site settings update")
-            self._json(200, {"ok": True, "git": gok, "git_msg": gout})
+            _ok, _msg = start_async_push("site settings update")
+            self._json(200, {"ok": True, "git": _ok, "git_msg": _msg})
         except Exception as e:
             self._json(400, {"ok": False, "error": str(e)})
 
@@ -618,8 +658,8 @@ class Handler(BaseHTTPRequestHandler):
             # 重写 index.html
             with open(INDEX_FILE, "w", encoding="utf-8") as f:
                 f.write(render_index(products))
-            gok, gout = git_commit_push("products update")
-            self._json(200, {"ok": True, "count": len(products), "git": gok, "git_msg": gout})
+            _ok, _msg = start_async_push("products update")
+            self._json(200, {"ok": True, "count": len(products), "git": _ok, "git_msg": _msg})
         except Exception as e:
             self._json(400, {"ok": False, "error": str(e)})
 
@@ -1301,12 +1341,31 @@ async function publishNow() {
   try {
     const r = await fetch('/api/git/push', { method: 'POST' });
     const j = await r.json();
-    setStatus(j.ok ? ((LANG==='zh'?'发布完成: ':'Published: ') + j.msg) : ((LANG==='zh'?'发布失败: ':'Publish failed: ') + j.msg), j.ok);
+    if (j.ok) {
+      setStatus((LANG==='zh'?'已开始发布，请稍候…':'Publishing started…'), true);
+    } else {
+      setStatus((LANG==='zh'?'发布启动失败: ':'Could not start: ') + (j.msg||''), false);
+    }
   } catch (e) {
     setStatus((LANG==='zh'?'发布出错: ':'Publish error: ') + e.message, false);
   }
   btn.textContent = (LANG==='zh') ? '立即发布' : 'Publish now';
-  loadGitStatus();
+  // 轮询后台任务结果
+  (async () => {
+    for (let i=0;i<30;i++) {
+      await new Promise(res => setTimeout(res, 800));
+      try {
+        const r2 = await fetch('/api/git/status');
+        const s = await r2.json();
+        const p = (s && s.push) || {};
+        if (!p.running) {
+          setStatus((p.ok ? ((LANG==='zh'?'发布完成: ':'Published: ')+p.msg) : ((LANG==='zh'?'发布失败: ':'Publish failed: ')+p.msg)), !!p.ok);
+          break;
+        }
+      } catch(e) { break; }
+    }
+    loadGitStatus();
+  })();
 }
 
 async function saveSettings(ev) {
@@ -1377,7 +1436,7 @@ const I18N = {
     legendGit:'Git 自动发布', lblGitRemote:'远程仓库地址 (GitHub)', spBranch:'分支', spPrefix:'提交前缀',
     cbAutoCommit:'保存后自动提交', cbAutoPush:'自动 push', btnPublishNow:'立即发布', btnSaveSettings:'保存设置',
     rowEdit:'编辑', rowDel:'删', btnAdd:'＋ 新增商品', openLink:'打开',
-    ready:'就绪', statusSaved:'已保存 {n} 件商品 · ', gitPublished:'已自动发布', notPushed:'未提交:', saving:'保存设置…',
+    ready:'就绪', statusSaved:'已保存 {n} 件商品 · ', gitPublished:'自动发布中', notPushed:'未提交:', saving:'保存设置…',
     err:'出错：', addProductTitle:'新增商品'
   },
   en: {
@@ -1395,7 +1454,7 @@ const I18N = {
     legendGit:'Git auto-publish', lblGitRemote:'Remote repository (GitHub)', spBranch:'Branch', spPrefix:'Commit prefix',
     cbAutoCommit:'Auto commit on save', cbAutoPush:'Auto push', btnPublishNow:'Publish now', btnSaveSettings:'Save settings',
     rowEdit:'Edit', rowDel:'Del', btnAdd:'＋ Add Item', openLink:'Open',
-    ready:'Ready', statusSaved:'Saved {n} items · ', gitPublished:'published', notPushed:'not pushed:', saving:'Saving…',
+    ready:'Ready', statusSaved:'Saved {n} items · ', gitPublished:'auto-publishing', notPushed:'not pushed:', saving:'Saving…',
     err:'Error: ', addProductTitle:'Add Item'
   }
 };
