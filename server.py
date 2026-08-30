@@ -33,14 +33,31 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(HERE, "products.json")
+SITE_FILE = os.path.join(HERE, "site.json")
 IMAGES_DIR = os.path.join(HERE, "images")
 INDEX_FILE = os.path.join(HERE, "index.html")
 
 PORT = 8000
 EMOJI_FALLBACK = "◼"
 
-# 本工具为纯本地编辑用，不做访问密码。每次保存都会覆盖 index.html，
-# 生成的 products.json / index.html / style.css / images/ 即为 GitHub Pages 要部署的纯静态文件。
+# ---- 网站自定义(改这里即可; 保存后会自动覆盖 index.html) ----
+SITE = {
+    "title": "小玲阿姨 · 黑白市集",          # 浏览器标签页标题
+    "logo": "小玲阿姨",                        # 左上角(不加"·市集"字样, 见 logo_dot)
+    "logo_dot": "·",                           # logo 里的分隔符
+    "logo_suffix": "市集",                     # logo 末尾
+    # 以下两段本次按要求删除 → 留空即不显示。想恢复就填文字。
+    "tagline": "",                             # 顶部副标题(留空不显示)
+    "footer_main": "",                         # 页脚主文案(留空不显示)
+    "footer_sub": "",                          # 页脚副文案(留空不显示)
+    # CSS 变量自定义(明暗主题配色)
+    "colors": {
+        "light": {"ink": "#000000", "paper": "#ffffff", "gray": "#666666", "light": "#efefef", "line": "#c8c8c8"},
+        "dark":  {"ink": "#ffffff", "paper": "#101010", "gray": "#9a9a9a", "light": "#1c1c1c", "line": "#3a3a3a"},
+    },
+    # 暗色模式: auto=跟随系统; light=默认浅色; dark=默认深色
+    "dark_default": "auto",
+}
 DEFAULT_PRODUCTS = [
     {
         "name": "复古机械键盘",
@@ -111,9 +128,51 @@ def save_products(products):
         json.dump(products, f, ensure_ascii=False, indent=2)
 
 
+def _deep_merge(base, extra):
+    """把 extra 递归并进 base 的副本, 返回新 dict。"""
+    out = dict(base)
+    for k, v in (extra or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def load_site():
+    """读取 site.json, 覆盖到默认 SITE 之上。"""
+    if os.path.exists(SITE_FILE):
+        try:
+            with open(SITE_FILE, "r", encoding="utf-8") as f:
+                extra = json.load(f)
+                if isinstance(extra, dict):
+                    return _deep_merge(SITE, extra)
+        except Exception:
+            pass
+    return SITE
+
+
+def save_site(site):
+    with open(SITE_FILE, "w", encoding="utf-8") as f:
+        json.dump(site, f, ensure_ascii=False, indent=2)
+
+
 def esc(s):
     """转义 HTML 且保留换行, 防止 XSS。"""
     return html.escape(s or "")
+
+
+def esc_js(s):
+    """转义一个 JS 字符串字面量(双引号包裹场景)。"""
+    s = s or ""
+    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "")
+
+
+def esc_css_var(v):
+    """清洗 CSS 变量值, 防止注入闭合/换行搞坏样式块。"""
+    v = v or ""
+    return re.sub(r"[{};\n\r]", "", v).strip()
+
 
 
 def thumb_html(p):
@@ -179,7 +238,44 @@ def render_index(products):
         )
 
     products_json = _asset_escape(products)
-    index = INDEX_TEMPLATE.replace("/*__CARDS__*/", cards_html)
+
+    # ---- 注入网站自定义 ----
+    s = load_site()
+    # 文案为空则不输出对应区块
+    tag_html = ('<p class="tagline">%s</p>' % esc(s.get("tagline"))) if s.get("tagline") else ""
+    foot_html = ("<p>%s</p>" % esc(s.get("footer_main"))) if s.get("footer_main") else ""
+    foot_sub_html = ('<p class="footer-sub">%s</p>' % esc(s.get("footer_sub"))) if s.get("footer_sub") else ""
+
+    c = s.get("colors", {})
+    light, dark = c.get("light", {}), c.get("dark", {})
+    # 构造明/暗两套 CSS 变量内联块(覆盖 style.css 中的 :root); 值经清洗防注入
+    css = ":root{" + "".join("--%s:%s;" % (esc_css_var(k), esc_css_var(v)) for k, v in light.items()) + "}"
+    css += "[data-theme=dark]{"
+    css += "".join("--%s:%s;" % (esc_css_var(k), esc_css_var(v)) for k, v in dark.items()) + "}"
+    # 主题默认: auto → 表示跟随系统。
+    _def = "system" if s.get("dark_default", "auto") == "auto" else s.get("dark_default", "system")
+    theme_js = (
+        "var _t=localStorage.getItem('bw-theme')||'%s';"
+        "document.documentElement.setAttribute('data-theme',"
+        " _t==='system'? (matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light') : _t);"
+        "window.toggleTheme=function(){"
+        " var e=document.documentElement.getAttribute('data-theme');"
+        " var n=(e==='dark')?'light':'dark';"
+        " document.documentElement.setAttribute('data-theme',n);"
+        " localStorage.setItem('bw-theme',n);"
+        "};"
+    ) % esc_js(_def)
+
+    index = INDEX_TEMPLATE.replace("/*__TITLE__*/", esc(s.get("title", "")))
+    index = index.replace("/*__LOGO__*/", esc(s.get("logo", "")))
+    index = index.replace("/*__LOGO_DOT__*/", esc(s.get("logo_dot", "")))
+    index = index.replace("/*__LOGO_SUFFIX__*/", esc(s.get("logo_suffix", "")))
+    index = index.replace("/*__TAGLINE__*/", tag_html)
+    index = index.replace("/*__FOOTER_MAIN__*/", foot_html)
+    index = index.replace("/*__FOOTER_SUB__*/", foot_sub_html)
+    index = index.replace("/*__COLOR_CSS__*/", css)
+    index = index.replace("/*__THEME_JS__*/", theme_js)
+    index = index.replace("/*__CARDS__*/", cards_html)
     index = index.replace("/*__EMPTY__*/", empty_html)
     index = index.replace("/*__PRODUCTS_JSON__*/", products_json)
     return index
@@ -224,6 +320,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(load_products(), ensure_ascii=False), "application/json; charset=utf-8")
         elif path == "/api/products":
             self._json(200, load_products())
+        elif path == "/api/settings":
+            self._json(200, load_site())
         elif path.startswith("/images/"):
             self._serve_image(path)
         else:
@@ -253,10 +351,27 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/products":
             self._handle_save()
+        elif path == "/api/settings":
+            self._handle_settings_save()
         elif path == "/api/upload":
             self._handle_upload()
         else:
             self._send(404, "<h1>404</h1>")
+
+    def _handle_settings_save(self):
+        try:
+            body = self._read_body().decode("utf-8")
+            incoming = json.loads(body)
+            if not isinstance(incoming, dict):
+                raise ValueError("body must be an object")
+            merged = _deep_merge(SITE, incoming)
+            save_site(merged)
+            # 同时覆盖 index.html 让设置生效
+            with open(INDEX_FILE, "w", encoding="utf-8") as f:
+                f.write(render_index(load_products()))
+            self._json(200, {"ok": True})
+        except Exception as e:
+            self._json(400, {"ok": False, "error": str(e)})
 
     def _handle_save(self):
         try:
@@ -304,7 +419,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def admin_page(self):
         products = load_products()
-        return ADMIN_TEMPLATE.replace("/*__PRODUCTS_JSON__*/", json.dumps(products, ensure_ascii=False))
+        page = ADMIN_TEMPLATE.replace("/*__PRODUCTS_JSON__*/", json.dumps(products, ensure_ascii=False))
+        page = page.replace("/*__SITE_JSON__*/", json.dumps(load_site(), ensure_ascii=False))
+        return page
 
 
 # ------------------------- 模板字符串 -------------------------
@@ -313,19 +430,23 @@ INDEX_TEMPLATE = '''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>小玲阿姨 · 黑白市集</title>
+<title>/*__TITLE__*/</title>
 <link rel="stylesheet" href="style.css">
 <style>
-  /* 内嵌样式由 style.css 提供 */
+  /*__COLOR_CSS__*/
 </style>
 </head>
 <body>
+<script>
+  /*__THEME_JS__*/
+</script>
 
 <header class="site-header">
   <div class="container header-inner">
-    <a href="/" class="logo">小玲阿姨<span class="logo-dot">·</span>市集</a>
-    <p class="tagline">BLACK &amp; WHITE STORE — 极简 · 精选 · 直跳 Marketplace</p>
+    <a href="/" class="logo">/*__LOGO__*/<span class="logo-dot">/*__LOGO_DOT__*/</span>/*__LOGO_SUFFIX__*/</a>
+    <button type="button" class="theme-toggle" onclick="window.toggleTheme()" aria-label="切换明暗" title="切换明暗模式">◐</button>
   </div>
+  /*__TAGLINE__*/
 </header>
 
 <main class="container">
@@ -342,8 +463,8 @@ INDEX_TEMPLATE = '''<!DOCTYPE html>
 </main>
 
 <footer class="site-footer">
-  <p>© 小玲阿姨 · 黑白市集 — 静态演示模板</p>
-  <p class="footer-sub">购买链接指向 Facebook Marketplace</p>
+  /*__FOOTER_MAIN__*/
+  /*__FOOTER_SUB__*/
 </footer>
 
 <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
@@ -450,6 +571,7 @@ textarea { resize: vertical; min-height: 80px; }
   <span class="spacer"></span>
   <span id="status" class="muted">就绪</span>
   <a class="btn" href="/" target="_blank">预览首页 →</a>
+  <button class="btn" onclick="openSettings()">⚙ 网站设置</button>
   <button class="btn" onclick="addProduct()">＋ 新增商品</button>
 </div>
 
@@ -489,8 +611,58 @@ textarea { resize: vertical; min-height: 80px; }
   </form>
 </div>
 
+<!-- 网站设置弹窗 -->
+<div id="settingsOverlay" class="overlay hidden">
+  <form id="settingsForm" class="panel" onsubmit="return saveSettings(event)">
+    <h2>网站设置</h2>
+    <label>站点标题（浏览器标签）</label>
+    <input type="text" id="s_title">
+    <label>Logo 文字</label>
+    <div class="form-row">
+      <input type="text" id="s_logo" placeholder="左">
+      <input type="text" id="s_logo_dot" placeholder="中(可留空)">
+      <input type="text" id="s_logo_suffix" placeholder="右">
+    </div>
+    <label>顶部副标题 Tagline（留空则不显示）</label>
+    <input type="text" id="s_tagline">
+    <label>页脚主文案（留空则不显示）</label>
+    <input type="text" id="s_footer_main">
+    <label>页脚副文案（留空则不显示）</label>
+    <input type="text" id="s_footer_sub">
+    <label>默认配色主题</label>
+    <div class="form-row">
+      <select id="s_dark_default" style="padding:8px">
+        <option value="auto">跟随系统 (auto)</option>
+        <option value="light">浅色</option>
+        <option value="dark">深色</option>
+      </select>
+    </div>
+    <fieldset style="border:1px solid var(--ink);padding:10px;margin-top:12px">
+      <legend class="muted">浅色模式配色</legend>
+      <div class="form-row" style="flex-wrap:wrap">
+        <label style="flex:1;min-width:120px">背景<input type="color" id="c_light_paper" style="width:100%"></label>
+        <label style="flex:1;min-width:120px">文字<input type="color" id="c_light_ink" style="width:100%"></label>
+        <label style="flex:1;min-width:120px">次要文字<input type="color" id="c_light_gray" style="width:100%"></label>
+      </div>
+    </fieldset>
+    <fieldset style="border:1px solid var(--ink);padding:10px;margin-top:12px">
+      <legend class="muted">深色模式配色</legend>
+      <div class="form-row" style="flex-wrap:wrap">
+        <label style="flex:1;min-width:120px">背景<input type="color" id="c_dark_paper" style="width:100%"></label>
+        <label style="flex:1;min-width:120px">文字<input type="color" id="c_dark_ink" style="width:100%"></label>
+        <label style="flex:1;min-width:120px">次要文字<input type="color" id="c_dark_gray" style="width:100%"></label>
+      </div>
+    </fieldset>
+    <div class="form-actions">
+      <button type="button" class="btn" onclick="hideSettings()">取消</button>
+      <button type="submit" class="btn">保存设置</button>
+    </div>
+  </form>
+</div>
+
 <script>
 /*__PRODUCTS_JSON__*/
+/*__SITE_JSON__*/
 let PRODUCTS = /*__PRODUCTS_JSON__*/;
 let pendingImage = null;   // base64
 let pendingFilename = null;
@@ -645,6 +817,72 @@ async function saveList() {
     if (!j.ok) throw new Error(j.error || '保存失败');
     setStatus('已保存 · ' + j.count + ' 件商品', true);
     renderRows();
+  } catch (e) {
+    setStatus('出错：' + e.message, false);
+  }
+}
+
+/* ============ 网站设置 ============ */
+const SITE_DEFAULT = /*__SITE_JSON__*/;
+
+function openSettings() {
+  const s = (typeof SITE !== 'undefined' && SITE) ? SITE : SITE_DEFAULT;
+  document.getElementById('s_title').value = s.title || '';
+  document.getElementById('s_logo').value = s.logo || '';
+  document.getElementById('s_logo_dot').value = s.logo_dot || '';
+  document.getElementById('s_logo_suffix').value = s.logo_suffix || '';
+  document.getElementById('s_tagline').value = s.tagline || '';
+  document.getElementById('s_footer_main').value = s.footer_main || '';
+  document.getElementById('s_footer_sub').value = s.footer_sub || '';
+  document.getElementById('s_dark_default').value = s.dark_default || 'auto';
+  const l = (s.colors || {}).light || {}, d = (s.colors || {}).dark || {};
+  document.getElementById('c_light_paper').value = l.paper || '#ffffff';
+  document.getElementById('c_light_ink').value = l.ink || '#000000';
+  document.getElementById('c_light_gray').value = l.gray || '#666666';
+  document.getElementById('c_dark_paper').value = d.paper || '#101010';
+  document.getElementById('c_dark_ink').value = d.ink || '#ffffff';
+  document.getElementById('c_dark_gray').value = d.gray || '#9a9a9a';
+  document.getElementById('settingsOverlay').classList.remove('hidden');
+}
+function hideSettings() {
+  document.getElementById('settingsOverlay').classList.add('hidden');
+}
+
+async function saveSettings(ev) {
+  ev.preventDefault();
+  const payload = {
+    title: document.getElementById('s_title').value.trim(),
+    logo: document.getElementById('s_logo').value.trim(),
+    logo_dot: document.getElementById('s_logo_dot').value.trim(),
+    logo_suffix: document.getElementById('s_logo_suffix').value.trim(),
+    tagline: document.getElementById('s_tagline').value.trim(),
+    footer_main: document.getElementById('s_footer_main').value.trim(),
+    footer_sub: document.getElementById('s_footer_sub').value.trim(),
+    dark_default: document.getElementById('s_dark_default').value,
+    colors: {
+      light: {
+        paper: document.getElementById('c_light_paper').value,
+        ink: document.getElementById('c_light_ink').value,
+        gray: document.getElementById('c_light_gray').value,
+      },
+      dark: {
+        paper: document.getElementById('c_dark_paper').value,
+        ink: document.getElementById('c_dark_ink').value,
+        gray: document.getElementById('c_dark_gray').value,
+      }
+    }
+  };
+  setStatus('保存设置…', true);
+  try {
+    const resp = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const j = await resp.json();
+    if (!j.ok) throw new Error(j.error || '保存失败');
+    setStatus('网站设置已保存，首页已更新', true);
+    hideSettings();
   } catch (e) {
     setStatus('出错：' + e.message, false);
   }

@@ -8,7 +8,18 @@
   --paper: #ffffff;
   --gray: #666666;
   --light: #efefef;
+  --line: #c8c8c8;
 }
+/* 暗色默认(会被 index.html 内联的 data-theme=dark 覆盖) */
+[data-theme="dark"] {
+  --ink: #ffffff;
+  --paper: #101010;
+  --gray: #9a9a9a;
+  --light: #1c1c1c;
+  --line: #3a3a3a;
+}
+html { color-scheme: light; }
+html[data-theme="dark"] { color-scheme: dark; }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html { -webkit-text-size-adjust: 100%; }
@@ -46,7 +57,22 @@ img { max-width: 100%; display: block; }
 }
 .logo { font-size: 24px; font-weight: 800; letter-spacing: 1px; text-decoration: none; color: var(--ink); }
 .logo-dot { color: var(--gray); }
-.tagline { font-size: 12px; letter-spacing: 2px; color: var(--gray); text-transform: uppercase; }
+.tagline {
+  text-align: center;
+  font-size: 12px; letter-spacing: 2px;
+  color: var(--gray); text-transform: uppercase;
+  padding-bottom: 14px;
+}
+.theme-toggle {
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 18px; line-height: 1;
+  width: 36px; height: 36px;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.theme-toggle:hover { background: var(--ink); color: var(--paper); }
 
 /* ---------- Hero ---------- */
 .hero { padding: 56px 0 40px; text-align: center; border-bottom: 1px solid var(--ink); }

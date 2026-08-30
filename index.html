@@ -6,16 +6,20 @@
 <title>小玲阿姨 · 黑白市集</title>
 <link rel="stylesheet" href="style.css">
 <style>
-  /* 内嵌样式由 style.css 提供 */
+  :root{--ink:#000000;--paper:#ffffff;--gray:#666666;--light:#efefef;--line:#c8c8c8;}[data-theme=dark]{--ink:#ffffff;--paper:#101010;--gray:#9a9a9a;--light:#1c1c1c;--line:#3a3a3a;}
 </style>
 </head>
 <body>
+<script>
+  var _t=localStorage.getItem('bw-theme')||'system';document.documentElement.setAttribute('data-theme', _t==='system'? (matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light') : _t);window.toggleTheme=function(){ var e=document.documentElement.getAttribute('data-theme'); var n=(e==='dark')?'light':'dark'; document.documentElement.setAttribute('data-theme',n); localStorage.setItem('bw-theme',n);};
+</script>
 
 <header class="site-header">
   <div class="container header-inner">
     <a href="/" class="logo">小玲阿姨<span class="logo-dot">·</span>市集</a>
-    <p class="tagline">BLACK &amp; WHITE STORE — 极简 · 精选 · 直跳 Marketplace</p>
+    <button type="button" class="theme-toggle" onclick="window.toggleTheme()" aria-label="切换明暗" title="切换明暗模式">◐</button>
   </div>
+  
 </header>
 
 <main class="container">
@@ -67,8 +71,8 @@
 </main>
 
 <footer class="site-footer">
-  <p>© 小玲阿姨 · 黑白市集 — 静态演示模板</p>
-  <p class="footer-sub">购买链接指向 Facebook Marketplace</p>
+  
+  
 </footer>
 
 <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
