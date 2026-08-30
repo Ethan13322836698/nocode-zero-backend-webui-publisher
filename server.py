@@ -712,11 +712,7 @@ SETUP_TEMPLATE = '''<!DOCTYPE html>
     </div>
     <div class="log" id="log">等待连接…</div>
 
-    <label>步骤 2 · 站点信息（可稍后在设置里改）</label>
-    <input type="text" id="s_title" placeholder="站点标题 (如 My Store)">
-    <input type="text" id="s_logo" placeholder="店名 / Logo (留空则用默认)" style="margin-top:10px">
-
-    <div class="setup-actions">
+    <div class="setup-actions" style="margin-top:16px">
       <a class="skip" href="/admin">跳过，直接进后台</a>
       <button class="btn" id="btnFinish">完成并进入后台</button>
     </div>
@@ -785,13 +781,7 @@ btnP.onclick = async () => {
 };
 
 btnF.onclick = async () => {
-  // 保存站点信息(可选)
-  const title=$('s_title').value.trim(), logo=$('s_logo').value.trim();
-  if(title||logo){
-    try{
-      await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title,logo})});
-    }catch(e){ console.log(e); }
-  }
+  // 完成 setup(站点信息之后可在后台设置里改)
   try{
     await fetch('/api/setup/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
   }catch(e){}
@@ -966,22 +956,23 @@ textarea { resize: vertical; min-height: 80px; }
 
 <div class="toolbar">
   <div class="toolbar-title">
-    <h1>商品管理后台</h1>
+    <h1 data-i18n="title">商品管理后台</h1>
     <span id="status" class="muted">就绪</span>
   </div>
   <div class="toolbar-actions">
-    <a class="btn" href="/" target="_blank">预览首页 →</a>
-    <button class="btn" onclick="openSettings()">⚙ 网站设置</button>
-    <button class="btn" onclick="addProduct()">＋ 新增商品</button>
+    <button class="btn" id="langToggle" onclick="toggleLang()" title="语言 / Language">EN</button>
+    <a class="btn" href="/" target="_blank" data-i18n="preview">预览首页 →</a>
+    <button class="btn" onclick="openSettings()" data-i18n="settings">⚙ 网站设置</button>
+    <button class="btn" onclick="addProduct()" data-i18n="addItem">＋ 新增商品</button>
   </div>
 </div>
 
-<p class="muted">改动后自动重写 <code>index.html</code>。图片上传到 <code>images/</code> 文件夹。</p>
+<p class="muted" data-i18n="tip">改动后自动重写 <code>index.html</code>。图片上传到 <code>images/</code> 文件夹。</p>
 
 <div class="table-wrap">
 <table>
   <thead>
-    <tr><th>图片</th><th>名称</th><th>价格</th><th>分类</th><th>简介</th><th>购买链接</th><th>操作</th></tr>
+    <tr><th data-i18n="thImg">图片</th><th data-i18n="thName">名称</th><th data-i18n="thPrice">价格</th><th data-i18n="thCat">分类</th><th data-i18n="thDesc">简介</th><th data-i18n="thLink">购买链接</th><th data-i18n="thOp">操作</th></tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
@@ -990,28 +981,28 @@ textarea { resize: vertical; min-height: 80px; }
 <!-- 表单弹窗 -->
 <div id="overlay" class="overlay hidden">
   <form id="form" class="panel" onsubmit="return save(event)">
-    <h2 id="formTitle">编辑商品</h2>
+    <h2 id="formTitle" data-i18n="editItem">编辑商品</h2>
     <input type="hidden" id="f_idx">
-    <label>名称</label>
+    <label data-i18n="lblName">名称</label>
     <input type="text" id="f_name" required>
-    <label>价格 <span class="muted">(例：¥ 299)</span></label>
+    <label data-i18n="lblPrice">价格 <span class="muted">(例：¥ 299)</span></label>
     <input type="text" id="f_price">
-    <label>分类</label>
+    <label data-i18n="lblCat">分类</label>
     <input type="text" id="f_cat">
-    <label>简介</label>
+    <label data-i18n="lblDesc">简介</label>
     <textarea id="f_desc"></textarea>
-    <label>购买链接 (Facebook Marketplace 页)</label>
+    <label data-i18n="lblBuyLink">购买链接 (Facebook Marketplace 页)</label>
     <input type="url" id="f_buy" placeholder="https://www.facebook.com/marketplace/...">
-    <label>购买按钮文案（留空用全局默认）</label>
+    <label data-i18n="lblBuyText">购买按钮文案（留空用全局默认）</label>
     <input type="text" id="f_buy_text" placeholder="留空则用网站设置的全局默认">
-    <label>商品图片</label>
+    <label data-i18n="lblImg">商品图片</label>
     <div class="form-row">
       <input type="file" id="f_file" accept="image/*">
     </div>
     <img id="thumbPreview" alt="图片预览">
     <div class="form-actions">
-      <button type="button" class="btn" onclick="hideForm()">取消</button>
-      <button type="submit" class="btn">保存</button>
+      <button type="button" class="btn" onclick="hideForm()" data-i18n="btnCancel">取消</button>
+      <button type="submit" class="btn" data-i18n="btnSave">保存</button>
     </div>
   </form>
 </div>
@@ -1019,71 +1010,71 @@ textarea { resize: vertical; min-height: 80px; }
 <!-- 网站设置弹窗 -->
 <div id="settingsOverlay" class="overlay hidden">
   <form id="settingsForm" class="panel" onsubmit="return saveSettings(event)">
-    <h2>网站设置</h2>
-    <label>站点标题（浏览器标签）</label>
+    <h2 data-i18n="settingsTitle">网站设置</h2>
+    <label data-i18n="lblSiteTitle">站点标题（浏览器标签）</label>
     <input type="text" id="s_title">
-    <label>Logo 文字</label>
+    <label data-i18n="lblLogo">Logo 文字</label>
     <div class="form-row">
       <input type="text" id="s_logo" placeholder="左">
       <input type="text" id="s_logo_dot" placeholder="中(可留空)">
       <input type="text" id="s_logo_suffix" placeholder="右">
     </div>
-    <label>顶部副标题 Tagline（留空则不显示）</label>
+    <label data-i18n="lblTagline">顶部副标题 Tagline（留空则不显示）</label>
     <input type="text" id="s_tagline">
-    <label>首页大标题</label>
+    <label data-i18n="lblHeroTitle">首页大标题</label>
     <input type="text" id="s_hero_title">
-    <label>首页副标题说明</label>
+    <label data-i18n="lblHeroSub">首页副标题说明</label>
     <input type="text" id="s_hero_sub">
-    <label>首页小徽标</label>
+    <label data-i18n="lblHeroNote">首页小徽标</label>
     <input type="text" id="s_hero_note">
-    <label>购买按钮全局默认文案（没单独设的商品用这个）</label>
+    <label data-i18n="lblBuyDefault">购买按钮全局默认文案（没单独设的商品用这个）</label>
     <input type="text" id="s_buy_default" placeholder="如: BUY NOW · GO TO FB MARKETPLACE">
-    <label>页脚主文案（留空则不显示）</label>
+    <label data-i18n="lblFooterMain">页脚主文案（留空则不显示）</label>
     <input type="text" id="s_footer_main">
-    <label>页脚副文案（留空则不显示）</label>
+    <label data-i18n="lblFooterSub">页脚副文案（留空则不显示）</label>
     <input type="text" id="s_footer_sub">
-    <label>默认配色主题</label>
+    <label data-i18n="lblTheme">默认配色主题</label>
     <div class="form-row">
       <select id="s_dark_default" style="padding:8px">
-        <option value="auto">跟随系统 (auto)</option>
-        <option value="light">浅色</option>
-        <option value="dark">深色</option>
+        <option value="auto" data-i18n="optAuto">跟随系统 (auto)</option>
+        <option value="light" data-i18n="optLight">浅色</option>
+        <option value="dark" data-i18n="optDark">深色</option>
       </select>
     </div>
     <fieldset>
-      <legend class="muted">浅色模式配色</legend>
+      <legend class="muted" data-i18n="legendLight">浅色模式配色</legend>
       <div class="form-row">
-        <label class="color-item"><span>背景</span><input type="color" id="c_light_paper"></label>
-        <label class="color-item"><span>文字</span><input type="color" id="c_light_ink"></label>
-        <label class="color-item"><span>次要文字</span><input type="color" id="c_light_gray"></label>
+        <label class="color-item"><span data-i18n="spBg">背景</span><input type="color" id="c_light_paper"></label>
+        <label class="color-item"><span data-i18n="spText">文字</span><input type="color" id="c_light_ink"></label>
+        <label class="color-item"><span data-i18n="spSub">次要文字</span><input type="color" id="c_light_gray"></label>
       </div>
     </fieldset>
     <fieldset>
-      <legend class="muted">深色模式配色</legend>
+      <legend class="muted" data-i18n="legendDark">深色模式配色</legend>
       <div class="form-row">
-        <label class="color-item"><span>背景</span><input type="color" id="c_dark_paper"></label>
-        <label class="color-item"><span>文字</span><input type="color" id="c_dark_ink"></label>
-        <label class="color-item"><span>次要文字</span><input type="color" id="c_dark_gray"></label>
+        <label class="color-item"><span data-i18n="spBg">背景</span><input type="color" id="c_dark_paper"></label>
+        <label class="color-item"><span data-i18n="spText">文字</span><input type="color" id="c_dark_ink"></label>
+        <label class="color-item"><span data-i18n="spSub">次要文字</span><input type="color" id="c_dark_gray"></label>
       </div>
     </fieldset>
     <fieldset>
-      <legend class="muted">Git 自动发布</legend>
-      <label>远程仓库地址 (GitHub)</label>
+      <legend class="muted" data-i18n="legendGit">Git 自动发布</legend>
+      <label data-i18n="lblGitRemote">远程仓库地址 (GitHub)</label>
       <input type="url" id="s_git_remote" placeholder="https://github.com/用户名/仓库名.git">
       <div class="form-row">
-        <label style="flex:1"><span class="muted" style="font-size:11px">分支</span><input type="text" id="s_git_branch" value="main"></label>
-        <label style="flex:1"><span class="muted" style="font-size:11px">提交前缀</span><input type="text" id="s_git_prefix" value="chore(shop): "></label>
+        <label style="flex:1"><span class="muted" style="font-size:11px" data-i18n="spBranch">分支</span><input type="text" id="s_git_branch" value="main"></label>
+        <label style="flex:1"><span class="muted" style="font-size:11px" data-i18n="spPrefix">提交前缀</span><input type="text" id="s_git_prefix" value="chore(shop): "></label>
       </div>
       <div class="form-row" style="align-items:center;margin-top:8px">
-        <label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="s_git_enabled" checked> 保存后自动提交</label>
-        <label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="s_git_push" checked> 自动 push</label>
-        <button type="button" class="btn" onclick="publishNow()" style="margin-left:auto">立即发布</button>
+        <label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="s_git_enabled" checked> <span data-i18n="cbAutoCommit">保存后自动提交</span></label>
+        <label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="s_git_push" checked> <span data-i18n="cbAutoPush">自动 push</span></label>
+        <button type="button" class="btn" onclick="publishNow()" style="margin-left:auto" data-i18n="btnPublishNow">立即发布</button>
       </div>
       <p class="muted" id="gitStatusHint" style="margin-top:8px">— 远程仓库未配置 —</p>
     </fieldset>
     <div class="form-actions">
-      <button type="button" class="btn" onclick="hideSettings()">取消</button>
-      <button type="submit" class="btn">保存设置</button>
+      <button type="button" class="btn" onclick="hideSettings()" data-i18n="btnCancel">取消</button>
+      <button type="submit" class="btn" data-i18n="btnSaveSettings">保存设置</button>
     </div>
   </form>
 </div>
@@ -1105,12 +1096,12 @@ function renderRows() {
     '<td>' + p.price + '</td>' +
     '<td>' + p.cat + '</td>' +
     '<td class="small">' + (p.desc ? p.desc.substring(0, 30) : '') + '</td>' +
-    '<td><a class="small" href="' + p.buy + '" target="_blank">打开</a></td>' +
+    '<td><a class="small" href="' + p.buy + '" target="_blank">' + (I18N[LANG].openLink || '打开') + '</a></td>' +
     '<td>' +
-      '<button class="btn" onclick="edit(' + i + ')">编辑</button> ' +
+      '<button class="btn" onclick="edit(' + i + ')">' + I18N[LANG].rowEdit + '</button> ' +
       '<button class="btn" onclick="move(' + i + ',-1)">↑</button> ' +
       '<button class="btn" onclick="move(' + i + ',1)">↓</button> ' +
-      '<button class="btn btn-danger" onclick="del(' + i + ')">删</button>' +
+      '<button class="btn btn-danger" onclick="del(' + i + ')">' + I18N[LANG].rowDel + '</button>' +
     '</td>' +
     '</tr>'
   ).join('');
@@ -1124,7 +1115,7 @@ function setStatus(msg, ok) {
 /* 表单 */
 function addProduct() {
   resetForm();
-  document.getElementById('formTitle').textContent = '新增商品';
+  document.getElementById('formTitle').textContent = (I18N[LANG].addProductTitle || '新增商品');
   showForm();
 }
 function edit(i) {
@@ -1140,7 +1131,7 @@ function edit(i) {
   const prev = document.getElementById('thumbPreview');
   prev.style.display = p.img ? 'block' : 'none';
   prev.src = p.img || '';
-  document.getElementById('formTitle').textContent = '编辑商品';
+  document.getElementById('formTitle').textContent = (I18N[LANG].editItem || '编辑商品');
   showForm();
 }
 function resetForm() {
@@ -1206,7 +1197,7 @@ async function save(ev) {
       PRODUCTS[parseInt(idx, 10)] = item;
     }
 
-    setStatus('保存中…', true);
+    setStatus(I18N[LANG].saving, true);
     const resp = await fetch('/api/products', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1214,11 +1205,11 @@ async function save(ev) {
     });
     const j = await resp.json();
     if (!j.ok) throw new Error(j.error || '保存失败');
-    setStatus('已保存 ' + j.count + ' 件商品 · ' + (j.git ? '已自动发布(' + (j.git_msg||'').split(': ').pop() + ')' : '未提交:' + (j.git_msg||'')), true);
+    setStatus(I18N[LANG].statusSaved.replace('{n}', j.count) + (j.git ? I18N[LANG].gitPublished : I18N[LANG].notPushed + (j.git_msg||'')), true);
     renderRows();
     hideForm();
   } catch (e) {
-    setStatus('出错：' + e.message, false);
+    setStatus((I18N[LANG].err||'出错：') + e.message, false);
   }
 }
 
@@ -1236,7 +1227,7 @@ function move(i, d) {
   saveList();
 }
 async function saveList() {
-  setStatus('保存中…', true);
+  setStatus(I18N[LANG].saving, true);
   try {
     const resp = await fetch('/api/products', {
       method: 'POST',
@@ -1245,10 +1236,10 @@ async function saveList() {
     });
     const j = await resp.json();
     if (!j.ok) throw new Error(j.error || '保存失败');
-    setStatus('已保存 ' + j.count + ' 件商品 · ' + (j.git ? '已自动发布' : '未提交:' + (j.git_msg||'')), true);
+    setStatus(I18N[LANG].statusSaved.replace('{n}', j.count) + (j.git ? I18N[LANG].gitPublished : I18N[LANG].notPushed + (j.git_msg||'')), true);
     renderRows();
   } catch (e) {
-    setStatus('出错：' + e.message, false);
+    setStatus((I18N[LANG].err||'出错：') + e.message, false);
   }
 }
 
@@ -1306,15 +1297,15 @@ async function loadGitStatus() {
 
 async function publishNow() {
   const btn = event.target;
-  btn.textContent = '发布中…';
+  btn.textContent = (LANG==='zh') ? '发布中…' : 'Publishing…';
   try {
     const r = await fetch('/api/git/push', { method: 'POST' });
     const j = await r.json();
-    setStatus(j.ok ? ('发布完成: ' + j.msg) : ('发布失败: ' + j.msg), j.ok);
+    setStatus(j.ok ? ((LANG==='zh'?'发布完成: ':'Published: ') + j.msg) : ((LANG==='zh'?'发布失败: ':'Publish failed: ') + j.msg), j.ok);
   } catch (e) {
-    setStatus('发布出错: ' + e.message, false);
+    setStatus((LANG==='zh'?'发布出错: ':'Publish error: ') + e.message, false);
   }
-  btn.textContent = '立即发布';
+  btn.textContent = (LANG==='zh') ? '立即发布' : 'Publish now';
   loadGitStatus();
 }
 
@@ -1353,7 +1344,7 @@ async function saveSettings(ev) {
       push: document.getElementById('s_git_push').checked,
     }
   };
-  setStatus('保存设置…', true);
+  setStatus(I18N[LANG].saving, true);
   try {
     const resp = await fetch('/api/settings', {
       method: 'POST',
@@ -1362,13 +1353,71 @@ async function saveSettings(ev) {
     });
     const j = await resp.json();
     if (!j.ok) throw new Error(j.error || '保存失败');
-    setStatus('网站设置已保存 · ' + (j.git ? '已自动发布' : '未提交:' + (j.git_msg||'')), true);
+    setStatus((LANG==='zh'?'网站设置已保存 · ':'Settings saved · ') + (j.git ? I18N[LANG].gitPublished : I18N[LANG].notPushed + (j.git_msg||'')), true);
     hideSettings();
   } catch (e) {
-    setStatus('出错：' + e.message, false);
+    setStatus((I18N[LANG].err||'出错：') + e.message, false);
   }
 }
 
+/* ============ 中英文切换 ============ */
+const I18N = {
+  zh: {
+    title:'商品管理后台', preview:'预览首页 →', settings:'⚙ 网站设置', addItem:'＋ 新增商品',
+    tip:'改动后自动重写 index.html。图片上传到 images/ 文件夹。',
+    thImg:'图片', thName:'名称', thPrice:'价格', thCat:'分类', thDesc:'简介', thLink:'购买链接', thOp:'操作',
+    editItem:'编辑商品', lblName:'名称', lblPrice:'价格 (例：¥ 299)', lblCat:'分类', lblDesc:'简介',
+    lblBuyLink:'购买链接 (Facebook Marketplace 页)', lblBuyText:'购买按钮文案（留空用全局默认）', lblImg:'商品图片',
+    btnCancel:'取消', btnSave:'保存',
+    settingsTitle:'网站设置', lblSiteTitle:'站点标题（浏览器标签）', lblLogo:'Logo 文字',
+    lblTagline:'顶部副标题 Tagline（留空则不显示）', lblHeroTitle:'首页大标题', lblHeroSub:'首页副标题说明', lblHeroNote:'首页小徽标',
+    lblBuyDefault:'购买按钮全局默认文案', lblFooterMain:'页脚主文案（留空则不显示）', lblFooterSub:'页脚副文案（留空则不显示）',
+    lblTheme:'默认配色主题', optAuto:'跟随系统 (auto)', optLight:'浅色', optDark:'深色',
+    legendLight:'浅色模式配色', legendDark:'深色模式配色', spBg:'背景', spText:'文字', spSub:'次要文字',
+    legendGit:'Git 自动发布', lblGitRemote:'远程仓库地址 (GitHub)', spBranch:'分支', spPrefix:'提交前缀',
+    cbAutoCommit:'保存后自动提交', cbAutoPush:'自动 push', btnPublishNow:'立即发布', btnSaveSettings:'保存设置',
+    rowEdit:'编辑', rowDel:'删', btnAdd:'＋ 新增商品', openLink:'打开',
+    ready:'就绪', statusSaved:'已保存 {n} 件商品 · ', gitPublished:'已自动发布', notPushed:'未提交:', saving:'保存设置…',
+    err:'出错：', addProductTitle:'新增商品'
+  },
+  en: {
+    title:'Item Admin', preview:'Preview →', settings:'⚙ Settings', addItem:'＋ Add Item',
+    tip:'Every change rewrites index.html. Uploaded images go into images/.',
+    thImg:'Image', thName:'Name', thPrice:'Price', thCat:'Category', thDesc:'Description', thLink:'Buy Link', thOp:'Actions',
+    editItem:'Edit Item', lblName:'Name', lblPrice:'Price (e.g. ¥ 299)', lblCat:'Category', lblDesc:'Description',
+    lblBuyLink:'Buy Link (Facebook Marketplace)', lblBuyText:'Buy button text (blank = global default)', lblImg:'Image',
+    btnCancel:'Cancel', btnSave:'Save',
+    settingsTitle:'Settings', lblSiteTitle:'Site title (browser tab)', lblLogo:'Logo text',
+    lblTagline:'Tagline (blank = hidden)', lblHeroTitle:'Homepage headline', lblHeroSub:'Homepage subtitle', lblHeroNote:'Homepage badge',
+    lblBuyDefault:'Default buy-button text', lblFooterMain:'Footer main text (blank = hidden)', lblFooterSub:'Footer sub text (blank = hidden)',
+    lblTheme:'Default theme', optAuto:'Follow system (auto)', optLight:'Light', optDark:'Dark',
+    legendLight:'Light palette', legendDark:'Dark palette', spBg:'Background', spText:'Text', spSub:'Muted text',
+    legendGit:'Git auto-publish', lblGitRemote:'Remote repository (GitHub)', spBranch:'Branch', spPrefix:'Commit prefix',
+    cbAutoCommit:'Auto commit on save', cbAutoPush:'Auto push', btnPublishNow:'Publish now', btnSaveSettings:'Save settings',
+    rowEdit:'Edit', rowDel:'Del', btnAdd:'＋ Add Item', openLink:'Open',
+    ready:'Ready', statusSaved:'Saved {n} items · ', gitPublished:'published', notPushed:'not pushed:', saving:'Saving…',
+    err:'Error: ', addProductTitle:'Add Item'
+  }
+};
+let LANG = localStorage.getItem('bw_admin_lang') || 'zh';
+
+function applyLang() {
+  const d = I18N[LANG] || I18N.zh;
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const k = el.getAttribute('data-i18n');
+    if (d[k] != null) el.textContent = d[k];
+  });
+  document.getElementById('langToggle').textContent = (LANG === 'zh') ? 'EN' : '中文';
+  document.getElementById('langToggle').title = (LANG === 'zh') ? 'Switch to English' : '切换为中文';
+  renderRows();
+}
+function toggleLang() {
+  LANG = (LANG === 'zh') ? 'en' : 'zh';
+  localStorage.setItem('bw_admin_lang', LANG);
+  applyLang();
+}
+
+applyLang();
 renderRows();
 </script>
 </body>
