@@ -30,9 +30,14 @@
   </section>
 
   <section id="grid" class="grid">
-
+            <button class="card" type="button" aria-label="View not sure details" data-idx="0">
+              <div class="card-thumb"><img src="/images/image_1.jpg" alt="not sure" loading="lazy"></div>
+              <div class="card-name">not sure</div>
+              <div class="card-price">9999999999</div>
+              <div class="card-cat">不知道</div>
+            </button>
   </section>
-<section class="empty-state"><div class="empty-mark">EMPTY</div><h2>Nothing is on sale yet</h2><p>No items available at the moment. Please check back later.</p><p class="empty-hint">New arrivals coming soon.</p></section>
+
 </main>
 
 <footer class="site-footer">
@@ -53,7 +58,7 @@
 </div>
 
 <script>
-const PRODUCTS = [];
+const PRODUCTS = [{"name": "not sure", "price": "9999999999", "cat": "不知道", "desc": "Hey", "buy": "https://www.facebook.com/marketplace/", "buy_text": "Just Go to here", "img": "images/image_1.jpg"}];
 const BUY_DEFAULT = "BUY NOW · GO TO FACEBOOK MARKETPLACE →";
 // 卡片已由服务端渲染；JS 只负责弹窗。
 (function () {
