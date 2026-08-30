@@ -1,5 +1,7 @@
 # 零后端静态内容发布系统（GitHub Pages + 本地 WebUI + Git 自动推送）
 
+> English version → **README.en.md**
+
 一个**零后端、零数据库**的轻量静态内容发布系统。用本地 WebUI 编辑内容，每次保存都会**自动提交并推送**到 Git，由 GitHub Pages 托管 → 刷新页面即更新。
 
 不需要服务器、不需要数据库、不需要第三方服务。**一个仓库 + GitHub Pages 就能跑起来。**
