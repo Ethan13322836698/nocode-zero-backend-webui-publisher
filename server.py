@@ -76,9 +76,32 @@ GIT = {
     "push": True,             # True=commit 后还会 push; False=只 commit
     "commit_prefix": "chore(shop): ",   # 提交信息前缀
     "branch": "main",         # 当前工作分支
+    "remote_url": "",         # 远程仓库地址(可空, 由 setup/设置写入)
 }
 # 有子目录限制时用 (如只提交本站目录), 留空则整个仓库。
 GIT_SUBPATH = ""
+
+# 首次使用标记: 完成 setup 后写入
+SETUP_FLAG_FILE = os.path.join(HERE, "setup.json")
+
+
+def load_git():
+    """读取站点配置里的 git 块, 覆盖到默认 GIT 之上。"""
+    try:
+        extra = load_site().get("git") or {}
+    except Exception:
+        extra = {}
+    merged = _deep_merge(GIT, extra)
+    return merged
+
+
+def setup_done():
+    return os.path.exists(SETUP_FLAG_FILE)
+
+
+def mark_setup_done():
+    with open(SETUP_FLAG_FILE, "w", encoding="utf-8") as f:
+        json.dump({"done": True, "ts": int(time.time())}, f)
 
 
 # ------------------------- 数据读写 -------------------------
@@ -149,8 +172,9 @@ def git_has_changes():
 
 def git_commit_push(message):
     """自动 add / commit / (push)。返回 (ok, 说明)。"""
-    if not GIT.get("enabled"):
-        return False, "git 自动提交已关闭 (GIT.enabled=false)"
+    g = load_git()
+    if not g.get("enabled"):
+        return False, "git 自动提交已关闭 (enabled=false)"
 
     # 1) add
     if GIT_SUBPATH:
@@ -168,7 +192,7 @@ def git_commit_push(message):
         return False, "没有任何改动, 已跳过提交"
 
     # 3) commit
-    prefix = GIT.get("commit_prefix", "")
+    prefix = g.get("commit_prefix", "")
     msg = prefix + (message or "update")
     ok, out = run_git(["commit", "-m", msg])
     if not ok:
@@ -179,13 +203,36 @@ def git_commit_push(message):
     commit_hash = out.strip().splitlines()[-1] if out.strip() else ""
 
     # 4) push (可选)
-    if GIT.get("push", True):
-        branch = GIT.get("branch", "main")
+    if g.get("push", True):
+        branch = g.get("branch", "main")
+        # 若配置了 remote_url 且尚未与 origin 关联, 先 set-url
+        remote_url = g.get("remote_url", "")
+        if remote_url:
+            ok, out = run_git(["remote", "get-url", "origin"])
+            if not ok or (ok and out.strip() != remote_url.strip()):
+                run_git(["remote", "set-url", "origin", remote_url.strip()])
         ok, out = run_git(["push", "origin", branch])
         if not ok:
             return False, "commit 成功但 push 失败: " + out
         return True, "已 commit + push: " + message
     return True, "已 commit (未 push): " + message
+
+
+def git_status():
+    """返回 git 环境信息, 供 setup/设置页展示。"""
+    g = load_git()
+    is_repo = os.path.isdir(os.path.join(HERE, ".git"))
+    ok, remote = run_git(["remote", "get-url", "origin"])
+    remote_url = remote if ok else g.get("remote_url", "")
+    ok2, branch = run_git(["branch", "--show-current"])
+    return {
+        "is_repo": is_repo,
+        "remote_url": remote_url.strip(),
+        "branch": branch.strip() if ok2 else g.get("branch", "main"),
+        "auto_enabled": g.get("enabled", True),
+        "auto_push": g.get("push", True),
+        "commit_prefix": g.get("commit_prefix", ""),
+    }
 
 
 def esc(s):
@@ -351,14 +398,22 @@ class Handler(BaseHTTPRequestHandler):
 
         if path in ("/", "/index.html"):
             self._send(200, render_index(load_products()))
+        elif path == "/setup":
+            self._send(200, self.setup_page())
         elif path == "/admin":
-            self._send(200, self.admin_page())
+            # 首次未完成 setup → 引导到 setup
+            if not setup_done():
+                self._send(200, self.setup_page())
+            else:
+                self._send(200, self.admin_page())
         elif path == "/products.json":
             self._send(200, json.dumps(load_products(), ensure_ascii=False), "application/json; charset=utf-8")
         elif path == "/api/products":
             self._json(200, load_products())
         elif path == "/api/settings":
             self._json(200, load_site())
+        elif path == "/api/git/status":
+            self._json(200, git_status())
         elif path.startswith("/images/"):
             self._serve_image(path)
         else:
@@ -390,10 +445,78 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_save()
         elif path == "/api/settings":
             self._handle_settings_save()
+        elif path == "/api/git/setup":
+            self._handle_git_setup()
+        elif path == "/api/git/push":
+            self._handle_git_push()
+        elif path == "/api/git/set-url":
+            self._handle_git_seturl()
+        elif path == "/api/setup/complete":
+            self._handle_setup_complete()
         elif path == "/api/upload":
             self._handle_upload()
         else:
             self._send(404, "<h1>404</h1>")
+
+    # ---- Git 发布 & Setup ----
+    def _handle_git_push(self):
+        """立即执行一次自动提交推送。"""
+        ok, msg = git_commit_push("manual publish")
+        self._json(200 if ok else 400, {"ok": ok, "msg": msg})
+
+    def _handle_git_setup(self):
+        """执行 setup 里的 git 任务: 关联 remote 并首次 push。"""
+        try:
+            body = json.loads(self._read_body().decode("utf-8") or "{}")
+            remote_url = (body.get("remote_url") or "").strip()
+            branch = (body.get("branch") or "main").strip()
+            if not remote_url:
+                self._json(400, {"ok": False, "error": "缺少远程仓库地址"})
+                return
+            # 1) 关联 remote
+            ok, _ = run_git(["remote", "add", "origin", remote_url])
+            if not ok:
+                # origin 已存在则改地址
+                ok, out = run_git(["remote", "set-url", "origin", remote_url])
+                if not ok:
+                    self._json(400, {"ok": False, "error": "设置 remote 失败: " + out})
+                    return
+            self._json(200, {"ok": True, "remote_url": remote_url, "branch": branch})
+        except Exception as e:
+            self._json(400, {"ok": False, "error": str(e)})
+
+    def _handle_git_seturl(self):
+        """设置页保存 git 配置: 更新 site.json 里的 git 块 + 关联 remote。"""
+        try:
+            body = json.loads(self._read_body().decode("utf-8") or "{}")
+            site = load_site()
+            git = dict(site.get("git") or {})
+            for k in ("enabled", "push", "commit_prefix", "branch", "remote_url"):
+                if k in body:
+                    git[k] = body[k]
+            site["git"] = git
+            save_site(site)
+            # 若给了 remote_url, 同步关联本地 remote
+            if git.get("remote_url"):
+                ok, out = run_git(["remote", "get-url", "origin"])
+                if not ok or (ok and out.strip() != git["remote_url"].strip()):
+                    run_git(["remote", "add", "origin", git["remote_url"].strip()])
+                    run_git(["remote", "set-url", "origin", git["remote_url"].strip()])
+            self._json(200, {"ok": True})
+        except Exception as e:
+            self._json(400, {"ok": False, "error": str(e)})
+
+    def _handle_setup_complete(self):
+        """完成首次 setup 标记。"""
+        try:
+            body = json.loads(self._read_body().decode("utf-8") or "{}")
+            mark_setup_done()
+            self._json(200, {"ok": True})
+        except Exception as e:
+            self._json(400, {"ok": False, "error": str(e)})
+
+    def setup_page(self):
+        return SETUP_TEMPLATE
 
     def _handle_settings_save(self):
         try:
@@ -403,6 +526,14 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("body must be an object")
             merged = _deep_merge(SITE, incoming)
             save_site(merged)
+            # 若设置里给了 git remote, 先同步本地 remote
+            git_merge = merged.get("git") or {}
+            if git_merge.get("remote_url"):
+                ru = str(git_merge["remote_url"]).strip()
+                ok, out = run_git(["remote", "get-url", "origin"])
+                if not ok or (ok and out.strip() != ru):
+                    run_git(["remote", "add", "origin", ru])
+                    run_git(["remote", "set-url", "origin", ru])
             # 同时覆盖 index.html 让设置生效
             with open(INDEX_FILE, "w", encoding="utf-8") as f:
                 f.write(render_index(load_products()))
@@ -464,6 +595,101 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ------------------------- 模板字符串 -------------------------
+
+# 首次设置向导(本地 server 专用, 不参与 GitHub Pages 部署)
+SETUP_TEMPLATE = '''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>首次设置 · 内容发布系统</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  .setup-wrap { max-width: 560px; margin: 40px auto; padding: 0 20px; }
+  .setup-card { border: 1px solid var(--ink); padding: 28px; }
+  .setup-card h1 { font-size: 24px; font-weight: 900; letter-spacing: 1px; margin-bottom: 6px; }
+  .setup-desc { color: var(--gray); font-size: 13px; margin-bottom: 20px; }
+  .setup-card label { display: block; font-weight: 700; margin: 16px 0 6px; font-size: 13px; }
+  .setup-card input[type=text], .setup-card input[type=url] { width: 100%; border: 1px solid var(--ink); padding: 10px; font-size: 14px; box-sizing: border-box; }
+  .setup-card .hint { font-size: 12px; color: var(--gray); margin-top: 4px; }
+  .setup-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 22px; flex-wrap: wrap; }
+  .log { margin-top: 14px; border: 1px dashed var(--ink); padding: 10px; font-size: 12px; color: var(--gray); min-height: 20px; white-space: pre-wrap; }
+  .step { display: inline-block; font-size: 11px; letter-spacing: 2px; padding: 2px 8px; background: var(--ink); color: var(--paper); margin-bottom: 10px; }
+  .skip { color: var(--gray); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="setup-wrap">
+  <div class="setup-card">
+    <div class="step">首次设置</div>
+    <h1>开始使用</h1>
+    <p class="setup-desc">在本地编辑内容，每次保存自动发布到你自己的 GitHub Pages 站点。仓库需你先在 GitHub 上创建好。</p>
+
+    <label>步骤 1 · GitHub 远程仓库地址</label>
+    <input type="text" id="remote_url" placeholder="https://github.com/用户名/仓库名.git  或  git@github.com:用户名/仓库名.git">
+    <p class="hint">先去 GitHub 新建一个空仓库，把它的 HTTPS 或 SSH 地址粘贴到这里。</p>
+
+    <div class="setup-actions">
+      <button class="btn" id="btnConnect">连接仓库</button>
+      <button class="btn" id="btnPush" disabled>推送发布内容</button>
+    </div>
+    <div class="log" id="log">等待连接…</div>
+
+    <label>步骤 2 · 站点信息（可稍后在设置里改）</label>
+    <input type="text" id="s_title" placeholder="站点标题 (如 My Store)">
+    <input type="text" id="s_logo" placeholder="店名 / Logo (留空则用默认)" style="margin-top:10px">
+
+    <div class="setup-actions">
+      <a class="skip" href="/admin">跳过，直接进后台</a>
+      <button class="btn" id="btnFinish">完成并进入后台</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+function log(msg){ $('log').textContent = msg; }
+const btnC=$('btnConnect'), btnP=$('btnPush'), btnF=$('btnFinish');
+
+btnC.onclick = async () => {
+  const url = $('remote_url').value.trim();
+  if(!url){ log('请先粘贴远程仓库地址'); return; }
+  log('正在关联远程仓库…');
+  try{
+    const r = await fetch('/api/git/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({remote_url:url,branch:'main'})});
+    const j = await r.json();
+    if(!j.ok){ log('失败: '+(j.error||'')); return; }
+    log('已关联远程仓库: '+j.remote_url);
+    btnP.disabled=false;
+  }catch(e){ log('连接出错: '+e.message); }
+};
+
+btnP.onclick = async () => {
+  log('正在提交并推送…');
+  try{
+    const r = await fetch('/api/git/push',{method:'POST'});
+    const j = await r.json();
+    log(j.ok?('✓ '+j.msg):('推送失败: '+j.msg));
+  }catch(e){ log('推送出错: '+e.message); }
+};
+
+btnF.onclick = async () => {
+  // 保存站点信息(可选)
+  const title=$('s_title').value.trim(), logo=$('s_logo').value.trim();
+  if(title||logo){
+    try{
+      await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title,logo})});
+    }catch(e){ console.log(e); }
+  }
+  try{
+    await fetch('/api/setup/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  }catch(e){}
+  location.href='/admin';
+};
+</script>
+</body>
+</html>'''
+
 INDEX_TEMPLATE = '''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -729,6 +955,21 @@ textarea { resize: vertical; min-height: 80px; }
         <label class="color-item"><span>次要文字</span><input type="color" id="c_dark_gray"></label>
       </div>
     </fieldset>
+    <fieldset>
+      <legend class="muted">Git 自动发布</legend>
+      <label>远程仓库地址 (GitHub)</label>
+      <input type="url" id="s_git_remote" placeholder="https://github.com/用户名/仓库名.git">
+      <div class="form-row">
+        <label style="flex:1"><span class="muted" style="font-size:11px">分支</span><input type="text" id="s_git_branch" value="main"></label>
+        <label style="flex:1"><span class="muted" style="font-size:11px">提交前缀</span><input type="text" id="s_git_prefix" value="chore(shop): "></label>
+      </div>
+      <div class="form-row" style="align-items:center;margin-top:8px">
+        <label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="s_git_enabled" checked> 保存后自动提交</label>
+        <label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="s_git_push" checked> 自动 push</label>
+        <button type="button" class="btn" onclick="publishNow()" style="margin-left:auto">立即发布</button>
+      </div>
+      <p class="muted" id="gitStatusHint" style="margin-top:8px">— 远程仓库未配置 —</p>
+    </fieldset>
     <div class="form-actions">
       <button type="button" class="btn" onclick="hideSettings()">取消</button>
       <button type="submit" class="btn">保存设置</button>
@@ -923,10 +1164,47 @@ function openSettings() {
   document.getElementById('c_dark_paper').value = d.paper || '#101010';
   document.getElementById('c_dark_ink').value = d.ink || '#ffffff';
   document.getElementById('c_dark_gray').value = d.gray || '#9a9a9a';
+  // git 设置
+  const g = (s.git || {});
+  document.getElementById('s_git_remote').value = g.remote_url || '';
+  document.getElementById('s_git_branch').value = g.branch || 'main';
+  document.getElementById('s_git_prefix').value = g.commit_prefix || 'chore(shop): ';
+  document.getElementById('s_git_enabled').checked = (g.enabled !== false);
+  document.getElementById('s_git_push').checked = (g.push !== false);
   document.getElementById('settingsOverlay').classList.remove('hidden');
+  loadGitStatus();
 }
 function hideSettings() {
   document.getElementById('settingsOverlay').classList.add('hidden');
+}
+
+async function loadGitStatus() {
+  try {
+    const r = await fetch('/api/git/status');
+    const j = await r.json();
+    const el = document.getElementById('gitStatusHint');
+    if (j && j.is_repo) {
+      el.textContent = '本地仓库: ✓  远程: ' + (j.remote_url || '未设置') + '  分支: ' + j.branch;
+    } else {
+      el.textContent = '未初始化 Git 仓库，请在 setup 或设置里配置远程地址。';
+    }
+  } catch (e) {
+    document.getElementById('gitStatusHint').textContent = '读取 git 状态失败';
+  }
+}
+
+async function publishNow() {
+  const btn = event.target;
+  btn.textContent = '发布中…';
+  try {
+    const r = await fetch('/api/git/push', { method: 'POST' });
+    const j = await r.json();
+    setStatus(j.ok ? ('发布完成: ' + j.msg) : ('发布失败: ' + j.msg), j.ok);
+  } catch (e) {
+    setStatus('发布出错: ' + e.message, false);
+  }
+  btn.textContent = '立即发布';
+  loadGitStatus();
 }
 
 async function saveSettings(ev) {
@@ -955,6 +1233,13 @@ async function saveSettings(ev) {
         ink: document.getElementById('c_dark_ink').value,
         gray: document.getElementById('c_dark_gray').value,
       }
+    },
+    git: {
+      remote_url: document.getElementById('s_git_remote').value.trim(),
+      branch: document.getElementById('s_git_branch').value.trim() || 'main',
+      commit_prefix: document.getElementById('s_git_prefix').value.trim(),
+      enabled: document.getElementById('s_git_enabled').checked,
+      push: document.getElementById('s_git_push').checked,
     }
   };
   setStatus('保存设置…', true);
