@@ -1,0 +1,165 @@
+/* =========================================================
+   黑白市集 · 黑白极简样式
+   供 静态首页(index.html) 与 管理后台(/admin) 共用
+   ========================================================= */
+
+:root {
+  --ink: #000000;
+  --paper: #ffffff;
+  --gray: #666666;
+  --light: #efefef;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", Helvetica, Arial, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+img { max-width: 100%; display: block; }
+
+.hidden { display: none !important; }
+
+.container {
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ---------- Header ---------- */
+.site-header { border-bottom: 1px solid var(--ink); background: var(--paper); }
+.header-inner {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 18px;
+  padding-bottom: 18px;
+}
+.logo { font-size: 24px; font-weight: 800; letter-spacing: 1px; text-decoration: none; color: var(--ink); }
+.logo-dot { color: var(--gray); }
+.tagline { font-size: 12px; letter-spacing: 2px; color: var(--gray); text-transform: uppercase; }
+
+/* ---------- Hero ---------- */
+.hero { padding: 56px 0 40px; text-align: center; border-bottom: 1px solid var(--ink); }
+.hero h1 {
+  font-size: clamp(28px, 5vw, 46px);
+  font-weight: 900;
+  letter-spacing: 6px;
+  text-transform: uppercase;
+  margin-bottom: 18px;
+}
+.hero-sub { max-width: 640px; margin: 0 auto 16px; font-size: 15px; color: var(--gray); }
+.hero-note {
+  font-size: 11px; letter-spacing: 3px; color: var(--paper);
+  background: var(--ink); display: inline-block; padding: 6px 14px;
+  text-transform: uppercase;
+}
+.hero .btn-ghost { margin-top: 16px; }
+
+/* ---------- Grid ---------- */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 24px; padding: 48px 0; }
+.card {
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  padding: 18px;
+  display: flex; flex-direction: column; cursor: pointer;
+  text-align: left; font-family: inherit; color: inherit; font-size: 100%;
+  transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
+}
+.card:hover, .card:focus-visible {
+  transform: translate(-3px, -3px);
+  box-shadow: 6px 6px 0 var(--ink);
+  background: var(--light);
+  outline: none;
+}
+.card-thumb {
+  width: 100%; aspect-ratio: 4 / 3;
+  border: 1px solid var(--ink);
+  display: flex; align-items: flex-end; justify-content: center;
+  overflow: hidden; margin-bottom: 14px; background: var(--paper);
+}
+.card-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.card-thumb .ph { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 64px; color: var(--ink); }
+.card-name { font-size: 17px; font-weight: 700; margin-bottom: 4px; }
+.card-price { font-size: 15px; font-weight: 800; }
+.card-cat { margin-top: 4px; font-size: 11px; letter-spacing: 1px; color: var(--gray); text-transform: uppercase; }
+
+/* ---------- Empty ---------- */
+.empty { text-align: center; padding: 60px 0; color: var(--gray); }
+.empty a { color: var(--ink); font-weight: 700; }
+
+/* ---------- 空状态 ---------- */
+.empty-state {
+  text-align: center;
+  padding: 90px 24px;
+  border: 1px dashed var(--ink);
+  margin: 48px 0 24px;
+  background: var(--paper);
+}
+.empty-mark {
+  display: inline-block;
+  font-size: 13px; letter-spacing: 4px;
+  color: var(--paper); background: var(--ink);
+  padding: 6px 16px; margin-bottom: 22px;
+}
+.empty-state h2 { font-size: 28px; font-weight: 900; letter-spacing: 2px; margin-bottom: 12px; }
+.empty-state p { font-size: 15px; color: var(--gray); }
+.empty-hint { margin-top: 18px; font-size: 12px; letter-spacing: 1px; color: var(--gray); }
+
+/* ---------- Modal ---------- */
+.modal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.7); }
+.modal-card {
+  position: relative; background: var(--paper); border: 1px solid var(--ink);
+  width: 100%; max-width: 480px; padding: 28px;
+  box-shadow: 10px 10px 0 var(--ink);
+  animation: pop .18s ease;
+}
+@keyframes pop { from { transform: translateY(8px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.modal-close { position: absolute; top: 10px; right: 14px; font-size: 26px; line-height: 1; border: none; background: none; cursor: pointer; color: var(--ink); }
+.modal-close:hover { font-weight: 900; }
+.modal-thumb {
+  width: 100%; aspect-ratio: 4 / 3; border: 1px solid var(--ink);
+  display: flex; align-items: center; justify-content: center; font-size: 88px;
+  background: var(--paper); margin-bottom: 16px; overflow: hidden;
+}
+.modal-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.modal-thumb span { line-height: 1; }
+.modal-card h2 { font-size: 24px; font-weight: 900; margin: 4px 0 2px; }
+.modal-price { font-size: 18px; font-weight: 900; margin-bottom: 12px; }
+.modal-desc { font-size: 14px; color: var(--gray); margin-bottom: 22px; }
+
+/* ---------- Buttons ---------- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  font-size: 15px; font-weight: 800; text-decoration: none;
+  padding: 14px 20px; border: 1px solid var(--ink); cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.btn-buy { width: 100%; background: var(--ink); color: var(--paper); }
+.btn-buy:hover, .btn-buy:focus-visible { background: var(--paper); color: var(--ink); outline: none; }
+.btn-ghost { background: var(--paper); color: var(--ink); margin-top: 12px; }
+.btn-ghost:hover { background: var(--ink); color: var(--paper); }
+
+/* ---------- Footer ---------- */
+.site-footer { border-top: 1px solid var(--ink); text-align: center; padding: 28px 24px; font-size: 13px; }
+.footer-sub { font-size: 11px; color: var(--gray); letter-spacing: 1px; margin-top: 4px; }
+
+/* ---------- Responsive ---------- */
+@media (max-width: 560px) {
+  .header-inner { flex-direction: column; }
+  .grid { grid-template-columns: 1fr 1fr; gap: 14px; }
+  .card-thumb .ph { font-size: 44px; }
+}
+@media (max-width: 380px) {
+  .grid { grid-template-columns: 1fr; }
+}
