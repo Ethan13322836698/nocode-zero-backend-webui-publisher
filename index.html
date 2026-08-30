@@ -30,9 +30,14 @@
   </section>
 
   <section id="grid" class="grid">
-
+            <button class="card" type="button" aria-label="View 发布测试 details" data-idx="0">
+              <div class="card-thumb"><div class="ph">◼</div></div>
+              <div class="card-name">发布测试</div>
+              <div class="card-price"></div>
+              <div class="card-cat"></div>
+            </button>
   </section>
-<section class="empty-state"><div class="empty-mark">EMPTY</div><h2>Nothing is on sale yet</h2><p>No items available at the moment. Please check back later.</p><p class="empty-hint">New arrivals coming soon.</p></section>
+
 </main>
 
 <footer class="site-footer">
@@ -53,7 +58,7 @@
 </div>
 
 <script>
-const PRODUCTS = [];
+const PRODUCTS = [{"name": "发布测试", "buy_text": "", "buy": "https://x", "img": ""}];
 const BUY_DEFAULT = "BUY NOW · GO TO FACEBOOK MARKETPLACE →";
 // 卡片已由服务端渲染；JS 只负责弹窗。
 (function () {
