@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-黑白市集 · 本地商品管理 Server
+黑白极简 · 商品管理 Server
 Python3 标准库实现, 无任何第三方依赖。
 
 用法:
@@ -22,12 +22,12 @@ Python3 标准库实现, 无任何第三方依赖。
 import os
 import re
 import json
-import math
+import time
 import html
-import shutil
 import threading
 import base64
 import mimetypes
+import subprocess
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -37,77 +37,48 @@ SITE_FILE = os.path.join(HERE, "site.json")
 IMAGES_DIR = os.path.join(HERE, "images")
 INDEX_FILE = os.path.join(HERE, "index.html")
 
-PORT = 8000
+PORT = int(os.environ.get("BWMARKET_PORT", "8000"))
 EMOJI_FALLBACK = "◼"
 
-# ---- 网站自定义(改这里即可; 保存后会自动覆盖 index.html) ----
+# ---- 站点配置(保存后覆盖 index.html) ----
+# 首页面向访客(英文), 后台面向本地管理(中文)。
 SITE = {
-    "title": "小玲阿姨 · 黑白市集",          # 浏览器标签页标题
-    "logo": "小玲阿姨",                        # 左上角(不加"·市集"字样, 见 logo_dot)
-    "logo_dot": "·",                           # logo 里的分隔符
-    "logo_suffix": "市集",                     # logo 末尾
-    # 以下两段本次按要求删除 → 留空即不显示。想恢复就填文字。
-    "tagline": "",                             # 顶部副标题(留空不显示)
-    "footer_main": "",                         # 页脚主文案(留空不显示)
-    "footer_sub": "",                          # 页脚副文案(留空不显示)
-    # CSS 变量自定义(明暗主题配色)
+    "title": "My Store · Black & White Store",   # 站点标题
+    "logo": "My Store",                          # 左上角店名
+    "logo_dot": "·",                             # 分隔符
+    "logo_suffix": "Store",                      # 店名后缀
+    "tagline": "",                               # 顶部副标题 (空则不显示)
+    "footer_main": "",                           # 页脚主文案 (空则不显示)
+    "footer_sub": "",                            # 页脚副文案 (空则不显示)
+    # 首页 hero 文案
+    "hero_title": "Things I Sell",               # 大标题
+    "hero_sub": "Click a card to view details. Press BUY to jump over to Facebook Marketplace.",
+    "hero_note": "JUMPS DIRECTLY TO FACEBOOK MARKETPLACE",
+    # 购买按钮全局默认文案; 单个商品可单独覆盖
+    "buy_default": "BUY NOW · GO TO FACEBOOK MARKETPLACE →",
+    # 配色 (CSS 变量)
     "colors": {
         "light": {"ink": "#000000", "paper": "#ffffff", "gray": "#666666", "light": "#efefef", "line": "#c8c8c8"},
         "dark":  {"ink": "#ffffff", "paper": "#101010", "gray": "#9a9a9a", "light": "#1c1c1c", "line": "#3a3a3a"},
     },
-    # 暗色模式: auto=跟随系统; light=默认浅色; dark=默认深色
-    "dark_default": "auto",
+    "dark_default": "auto",                      # auto=跟随系统; light/dark 固定
 }
-DEFAULT_PRODUCTS = [
-    {
-        "name": "复古机械键盘",
-        "price": "¥ 299",
-        "cat": "桌面 / 数码",
-        "desc": "87 键茶轴，铝合金外壳，黑白撞色键帽。9 成新，功能完好，含原装数据线。",
-        "img": "",
-        "buy": "https://www.facebook.com/marketplace/",
-    },
-    {
-        "name": "羊毛针织开衫",
-        "price": "¥ 159",
-        "cat": "服饰 / 毛衣",
-        "desc": "米灰混色羊毛混纺，M 码宽松版型，秋冬厚实保暖。无起球无瑕疵。",
-        "img": "",
-        "buy": "https://www.facebook.com/marketplace/",
-    },
-    {
-        "name": "手冲咖啡套装",
-        "price": "¥ 199",
-        "cat": "居家 / 咖啡",
-        "desc": "玻璃分享壶 + 树脂滤杯 + 20 张滤纸 + 电子秤。日常自用，导热均匀。",
-        "img": "",
-        "buy": "https://www.facebook.com/marketplace/",
-    },
-    {
-        "name": "极简帆布托特包",
-        "price": "¥ 89",
-        "cat": "配饰 / 包包",
-        "desc": "12 安厚帆布，黑底白字标语，内袋两个，可放 13 寸笔记本。全新未使用。",
-        "img": "",
-        "buy": "https://www.facebook.com/marketplace/",
-    },
-    {
-        "name": "盆栽小绿植",
-        "price": "¥ 45",
-        "cat": "居家 / 桌面",
-        "desc": "白瓷小花盆配多肉，养了半年状态很好，皮实好养，附送营养土。仅限自取。",
-        "img": "",
-        "buy": "https://www.facebook.com/marketplace/",
-    },
-    {
-        "name": "皮质工装短靴",
-        "price": "¥ 249",
-        "cat": "服饰 / 鞋靴",
-        "desc": "头层牛皮磨砂黑，41 码，厚底防滑。穿过一季，皮质完好。",
-        "img": "",
-        "buy": "https://www.facebook.com/marketplace/",
-    },
-]
+
+# 无内置商品: 首次启动保持空列表
+DEFAULT_PRODUCTS = []
+
+
+# ---- 自动 Git 发布 ----
+# 保存后自动 git add/commit/push, 让 GitHub Pages 实时更新(零后端/数据库)。
+# remote/branch 按你仓库设置改; commit_msg_prefix 用于区分改动来源。
+GIT = {
+    "enabled": True,          # 关闭则保存后只写本地文件, 不提交
+    "push": True,             # True=commit 后还会 push; False=只 commit
+    "commit_prefix": "chore(shop): ",   # 提交信息前缀
+    "branch": "main",         # 当前工作分支
+}
+# 有子目录限制时用 (如只提交本站目录), 留空则整个仓库。
+GIT_SUBPATH = ""
 
 
 # ------------------------- 数据读写 -------------------------
@@ -155,6 +126,66 @@ def load_site():
 def save_site(site):
     with open(SITE_FILE, "w", encoding="utf-8") as f:
         json.dump(site, f, ensure_ascii=False, indent=2)
+
+
+# ------------------------- 自动 Git 发布 -------------------------
+def run_git(args, timeout=30):
+    """执行 git 命令, 返回 (ok, output)"""
+    try:
+        p = subprocess.run(
+            ["git"] + args,
+            cwd=HERE, capture_output=True, text=True, timeout=timeout,
+        )
+        out = (p.stdout or "") + (p.stderr or "")
+        return p.returncode == 0, out.strip()
+    except Exception as e:
+        return False, str(e)
+
+
+def git_has_changes():
+    ok, _ = run_git(["status", "--porcelain"])
+    return ok
+
+
+def git_commit_push(message):
+    """自动 add / commit / (push)。返回 (ok, 说明)。"""
+    if not GIT.get("enabled"):
+        return False, "git 自动提交已关闭 (GIT.enabled=false)"
+
+    # 1) add
+    if GIT_SUBPATH:
+        ok, out = run_git(["add", "-A", "--", GIT_SUBPATH])
+    else:
+        ok, out = run_git(["add", "-A"])
+    if not ok:
+        return False, "git add 失败: " + out
+
+    # 2) 无改动则跳过
+    ok, changed = run_git(["status", "--porcelain"])
+    if not ok:
+        return False, "git status 失败: " + changed
+    if not changed.strip():
+        return False, "没有任何改动, 已跳过提交"
+
+    # 3) commit
+    prefix = GIT.get("commit_prefix", "")
+    msg = prefix + (message or "update")
+    ok, out = run_git(["commit", "-m", msg])
+    if not ok:
+        # 常见: 没有配置 identity
+        if "user.name" in out or "user.email" in out:
+            return False, "git 未配置 user.name/user.email, 全局先 `git config --global user.name ...`"
+        return False, "git commit 失败: " + out
+    commit_hash = out.strip().splitlines()[-1] if out.strip() else ""
+
+    # 4) push (可选)
+    if GIT.get("push", True):
+        branch = GIT.get("branch", "main")
+        ok, out = run_git(["push", "origin", branch])
+        if not ok:
+            return False, "commit 成功但 push 失败: " + out
+        return True, "已 commit + push: " + message
+    return True, "已 commit (未 push): " + message
 
 
 def esc(s):
@@ -207,7 +238,7 @@ def render_index(products):
     cards = []
     for i, p in enumerate(products):
         cards.append(
-            """            <button class="card" type="button" aria-label="查看 %s 简介" data-idx="%d">
+            """            <button class="card" type="button" aria-label="View %s details" data-idx="%d">
               <div class="card-thumb">%s</div>
               <div class="card-name">%s</div>
               <div class="card-price">%s</div>
@@ -229,11 +260,10 @@ def render_index(products):
         cards_html = ""
         empty_html = (
             '<section class="empty-state">'
-            '<div class="empty-mark">［空］</div>'
-            '<h2>暂时没有在售商品</h2>'
-            '<p>本店当前暂无上架商品，敬请期待。'
-            '<br>（商品上架前，本页显示空状态提示）</p>'
-            '<p class="empty-hint">有新货想上架？店主可在管理后台添加。</p>'
+            '<div class="empty-mark">EMPTY</div>'
+            '<h2>Nothing is on sale yet</h2>'
+            '<p>No items available at the moment. Please check back later.</p>'
+            '<p class="empty-hint">New arrivals coming soon.</p>'
             '</section>'
         )
 
@@ -245,6 +275,9 @@ def render_index(products):
     tag_html = ('<p class="tagline">%s</p>' % esc(s.get("tagline"))) if s.get("tagline") else ""
     foot_html = ("<p>%s</p>" % esc(s.get("footer_main"))) if s.get("footer_main") else ""
     foot_sub_html = ('<p class="footer-sub">%s</p>' % esc(s.get("footer_sub"))) if s.get("footer_sub") else ""
+    hero_title_html = esc(s.get("hero_title") or "Things I Sell")
+    hero_sub_html = esc(s.get("hero_sub") or "")
+    hero_note_html = esc(s.get("hero_note") or "")
 
     c = s.get("colors", {})
     light, dark = c.get("light", {}), c.get("dark", {})
@@ -273,8 +306,12 @@ def render_index(products):
     index = index.replace("/*__TAGLINE__*/", tag_html)
     index = index.replace("/*__FOOTER_MAIN__*/", foot_html)
     index = index.replace("/*__FOOTER_SUB__*/", foot_sub_html)
+    index = index.replace("/*__HERO_TITLE__*/", hero_title_html)
+    index = index.replace("/*__HERO_SUB__*/", hero_sub_html)
+    index = index.replace("/*__HERO_NOTE__*/", hero_note_html)
     index = index.replace("/*__COLOR_CSS__*/", css)
     index = index.replace("/*__THEME_JS__*/", theme_js)
+    index = index.replace("/*__BUY_DEFAULT__*/", esc_js(s.get("buy_default") or "BUY NOW · GO TO FACEBOOK MARKETPLACE →"))
     index = index.replace("/*__CARDS__*/", cards_html)
     index = index.replace("/*__EMPTY__*/", empty_html)
     index = index.replace("/*__PRODUCTS_JSON__*/", products_json)
@@ -325,7 +362,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/images/"):
             self._serve_image(path)
         else:
-            # 预留 style.css / script.js 旧文件兼容
+            # 静态文件直读 (style.css / 图片等)
             fpath = os.path.join(HERE, path.lstrip("/"))
             if os.path.isfile(fpath):
                 ctype, _ = mimetypes.guess_type(fpath)
@@ -369,7 +406,8 @@ class Handler(BaseHTTPRequestHandler):
             # 同时覆盖 index.html 让设置生效
             with open(INDEX_FILE, "w", encoding="utf-8") as f:
                 f.write(render_index(load_products()))
-            self._json(200, {"ok": True})
+            gok, gout = git_commit_push("site settings update")
+            self._json(200, {"ok": True, "git": gok, "git_msg": gout})
         except Exception as e:
             self._json(400, {"ok": False, "error": str(e)})
 
@@ -384,7 +422,8 @@ class Handler(BaseHTTPRequestHandler):
             # 重写 index.html
             with open(INDEX_FILE, "w", encoding="utf-8") as f:
                 f.write(render_index(products))
-            self._json(200, {"ok": True, "count": len(products)})
+            gok, gout = git_commit_push("products update")
+            self._json(200, {"ok": True, "count": len(products), "git": gok, "git_msg": gout})
         except Exception as e:
             self._json(400, {"ok": False, "error": str(e)})
 
@@ -444,16 +483,16 @@ INDEX_TEMPLATE = '''<!DOCTYPE html>
 <header class="site-header">
   <div class="container header-inner">
     <a href="/" class="logo">/*__LOGO__*/<span class="logo-dot">/*__LOGO_DOT__*/</span>/*__LOGO_SUFFIX__*/</a>
-    <button type="button" class="theme-toggle" onclick="window.toggleTheme()" aria-label="切换明暗" title="切换明暗模式">◐</button>
+    <button type="button" class="theme-toggle" onclick="window.toggleTheme()" aria-label="Toggle dark mode" title="Toggle dark / light">◐</button>
   </div>
   /*__TAGLINE__*/
 </header>
 
 <main class="container">
   <section class="hero">
-    <h1>THINGS I SELL</h1>
-    <p class="hero-sub">以下均为演示商品。点任一方格查看简介，喜欢就点「立即购买」，会跳转到 Facebook Marketplace。</p>
-    <p class="hero-note">PURE STATIC · NO BACKEND</p>
+    <h1>/*__HERO_TITLE__*/</h1>
+    <p class="hero-sub">/*__HERO_SUB__*/</p>
+    <p class="hero-note">/*__HERO_NOTE__*/</p>
   </section>
 
   <section id="grid" class="grid">
@@ -475,12 +514,13 @@ INDEX_TEMPLATE = '''<!DOCTYPE html>
     <h2 id="modal-title" data-title></h2>
     <p class="modal-price" data-price></p>
     <p class="modal-desc" data-desc></p>
-    <a class="btn btn-buy" data-buy href="#" target="_blank" rel="noopener noreferrer">立即购买 · 前往 Marketplace →</a>
+    <a class="btn btn-buy" data-buy href="#" target="_blank" rel="noopener noreferrer">BUY NOW · GO TO FACEBOOK MARKETPLACE →</a>
   </article>
 </div>
 
 <script>
 const PRODUCTS = /*__PRODUCTS_JSON__*/;
+const BUY_DEFAULT = "/*__BUY_DEFAULT__*/";
 // 卡片已由服务端渲染；JS 只负责弹窗。
 (function () {
   const grid = document.getElementById('grid');
@@ -498,8 +538,9 @@ const PRODUCTS = /*__PRODUCTS_JSON__*/;
       : '<span>◼</span>';
     mTitle.textContent = p.name || '';
     mPrice.textContent = p.price || '';
-    mDesc.textContent = p.desc || '暂无简介。';
+    mDesc.textContent = p.desc || 'No description yet.';
     mBuy.href = p.buy || 'https://www.facebook.com/marketplace/';
+    mBuy.textContent = p.buy_text || BUY_DEFAULT;
     modal.classList.remove('hidden');
     document.body.style.overflow = 'hidden';
   }
@@ -529,15 +570,29 @@ ADMIN_TEMPLATE = '''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>黑白市集 · 管理后台</title>
+<title>商品管理后台</title>
 <link rel="stylesheet" href="style.css">
 <style>
 /* —— 管理页专用版式 —— */
-body.admin-body { padding: 24px; max-width: 1080px; margin: 0 auto; }
-.toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 16px 0; border-bottom: 1px solid var(--ink); }
-.toolbar h1 { font-size: 22px; font-weight: 900; letter-spacing: 2px; }
-.toolbar .spacer { flex: 1; }
+body.admin-body { padding: 20px; max-width: 1200px; margin: 0 auto; overflow-x: hidden; }
+.toolbar {
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  padding: 16px 0; border-bottom: 1px solid var(--ink); box-sizing: border-box;
+}
+.toolbar-title {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; min-width: 0;
+}
+.toolbar-title h1 { font-size: 20px; font-weight: 900; letter-spacing: 1px; white-space: normal; }
+.toolbar-actions {
+  display: flex; flex-wrap: wrap; gap: 10px; margin-left: auto; min-width: 0;
+}
+.toolbar .btn { white-space: nowrap; }
+.toolbar .btn {
+  flex: 0 0 auto;
+}
 .muted { color: var(--gray); font-size: 12px; }
+.table-wrap { overflow-x: auto; width: 100%; }
+.table-wrap table { min-width: 760px; }
 table { width: 100%; border-collapse: collapse; margin-top: 20px; }
 th, td { border: 1px solid var(--ink); padding: 10px; text-align: left; font-size: 14px; vertical-align: middle; }
 th { background: var(--ink); color: var(--paper); letter-spacing: 1px; }
@@ -552,37 +607,48 @@ a.small { color: var(--ink); text-decoration: underline; }
 #status.err { border: 1px solid #000; background: #000; color: #fff; }
 
 /* 弹窗表单 */
-.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 16px; }
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 16px; box-sizing: border-box; overflow-y: auto; }
 .overlay.hidden { display: none; }
-form.panel { background: var(--paper); border: 1px solid var(--ink); max-width: 520px; width: 100%; padding: 24px; }
+form.panel { background: var(--paper); border: 1px solid var(--ink); max-width: 520px; width: 100%; padding: 24px; box-sizing: border-box; overflow-y: auto; max-height: calc(100vh - 32px); }
 form.panel h2 { margin-bottom: 16px; }
+form.panel fieldset { min-width: 0; border: 1px solid var(--ink); padding: 10px; margin-top: 12px; }
+form.panel legend { padding: 0 6px; }
+form.panel .form-row > * { min-width: 0; }
 label { display: block; font-weight: 700; margin: 12px 0 4px; font-size: 13px; }
-input[type=text], input[type=url], textarea { width: 100%; border: 1px solid var(--ink); padding: 8px; font-size: 14px; font-family: inherit; }
+input[type=text], input[type=url], textarea { width: 100%; border: 1px solid var(--ink); padding: 8px; font-size: 14px; font-family: inherit; box-sizing: border-box; }
+input[type=color] { width: 100%; height: 36px; border: 1px solid var(--ink); padding: 0; box-sizing: border-box; cursor: pointer; }
 textarea { resize: vertical; min-height: 80px; }
-.form-row { display: flex; gap: 10px; }
+.form-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.color-item { flex: 1 1 130px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.color-item span { font-size: 12px; font-weight: 700; }
 #thumbPreview { max-width: 120px; max-height: 120px; border: 1px solid var(--ink); object-fit: contain; margin-top: 8px; display: none; }
-.form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+.form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
 </style>
 </head>
 <body class="admin-body">
 
 <div class="toolbar">
-  <h1>黑白市集 · 管理后台</h1>
-  <span class="spacer"></span>
-  <span id="status" class="muted">就绪</span>
-  <a class="btn" href="/" target="_blank">预览首页 →</a>
-  <button class="btn" onclick="openSettings()">⚙ 网站设置</button>
-  <button class="btn" onclick="addProduct()">＋ 新增商品</button>
+  <div class="toolbar-title">
+    <h1>商品管理后台</h1>
+    <span id="status" class="muted">就绪</span>
+  </div>
+  <div class="toolbar-actions">
+    <a class="btn" href="/" target="_blank">预览首页 →</a>
+    <button class="btn" onclick="openSettings()">⚙ 网站设置</button>
+    <button class="btn" onclick="addProduct()">＋ 新增商品</button>
+  </div>
 </div>
 
 <p class="muted">改动后自动重写 <code>index.html</code>。图片上传到 <code>images/</code> 文件夹。</p>
 
+<div class="table-wrap">
 <table>
   <thead>
     <tr><th>图片</th><th>名称</th><th>价格</th><th>分类</th><th>简介</th><th>购买链接</th><th>操作</th></tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
+</div>
 
 <!-- 表单弹窗 -->
 <div id="overlay" class="overlay hidden">
@@ -599,6 +665,8 @@ textarea { resize: vertical; min-height: 80px; }
     <textarea id="f_desc"></textarea>
     <label>购买链接 (Facebook Marketplace 页)</label>
     <input type="url" id="f_buy" placeholder="https://www.facebook.com/marketplace/...">
+    <label>购买按钮文案（留空用全局默认）</label>
+    <input type="text" id="f_buy_text" placeholder="留空则用网站设置的全局默认">
     <label>商品图片</label>
     <div class="form-row">
       <input type="file" id="f_file" accept="image/*">
@@ -625,6 +693,14 @@ textarea { resize: vertical; min-height: 80px; }
     </div>
     <label>顶部副标题 Tagline（留空则不显示）</label>
     <input type="text" id="s_tagline">
+    <label>首页大标题</label>
+    <input type="text" id="s_hero_title">
+    <label>首页副标题说明</label>
+    <input type="text" id="s_hero_sub">
+    <label>首页小徽标</label>
+    <input type="text" id="s_hero_note">
+    <label>购买按钮全局默认文案（没单独设的商品用这个）</label>
+    <input type="text" id="s_buy_default" placeholder="如: BUY NOW · GO TO FB MARKETPLACE">
     <label>页脚主文案（留空则不显示）</label>
     <input type="text" id="s_footer_main">
     <label>页脚副文案（留空则不显示）</label>
@@ -637,20 +713,20 @@ textarea { resize: vertical; min-height: 80px; }
         <option value="dark">深色</option>
       </select>
     </div>
-    <fieldset style="border:1px solid var(--ink);padding:10px;margin-top:12px">
+    <fieldset>
       <legend class="muted">浅色模式配色</legend>
-      <div class="form-row" style="flex-wrap:wrap">
-        <label style="flex:1;min-width:120px">背景<input type="color" id="c_light_paper" style="width:100%"></label>
-        <label style="flex:1;min-width:120px">文字<input type="color" id="c_light_ink" style="width:100%"></label>
-        <label style="flex:1;min-width:120px">次要文字<input type="color" id="c_light_gray" style="width:100%"></label>
+      <div class="form-row">
+        <label class="color-item"><span>背景</span><input type="color" id="c_light_paper"></label>
+        <label class="color-item"><span>文字</span><input type="color" id="c_light_ink"></label>
+        <label class="color-item"><span>次要文字</span><input type="color" id="c_light_gray"></label>
       </div>
     </fieldset>
-    <fieldset style="border:1px solid var(--ink);padding:10px;margin-top:12px">
+    <fieldset>
       <legend class="muted">深色模式配色</legend>
-      <div class="form-row" style="flex-wrap:wrap">
-        <label style="flex:1;min-width:120px">背景<input type="color" id="c_dark_paper" style="width:100%"></label>
-        <label style="flex:1;min-width:120px">文字<input type="color" id="c_dark_ink" style="width:100%"></label>
-        <label style="flex:1;min-width:120px">次要文字<input type="color" id="c_dark_gray" style="width:100%"></label>
+      <div class="form-row">
+        <label class="color-item"><span>背景</span><input type="color" id="c_dark_paper"></label>
+        <label class="color-item"><span>文字</span><input type="color" id="c_dark_ink"></label>
+        <label class="color-item"><span>次要文字</span><input type="color" id="c_dark_gray"></label>
       </div>
     </fieldset>
     <div class="form-actions">
@@ -661,9 +737,8 @@ textarea { resize: vertical; min-height: 80px; }
 </div>
 
 <script>
-/*__PRODUCTS_JSON__*/
-/*__SITE_JSON__*/
 let PRODUCTS = /*__PRODUCTS_JSON__*/;
+let SITE_DEFAULT = /*__SITE_JSON__*/;
 let pendingImage = null;   // base64
 let pendingFilename = null;
 
@@ -708,6 +783,7 @@ function edit(i) {
   document.getElementById('f_cat').value = p.cat || '';
   document.getElementById('f_desc').value = p.desc || '';
   document.getElementById('f_buy').value = p.buy || '';
+  document.getElementById('f_buy_text').value = p.buy_text || '';
   pendingImage = null; pendingFilename = null;
   const prev = document.getElementById('thumbPreview');
   prev.style.display = p.img ? 'block' : 'none';
@@ -722,6 +798,7 @@ function resetForm() {
   document.getElementById('f_cat').value = '';
   document.getElementById('f_desc').value = '';
   document.getElementById('f_buy').value = 'https://www.facebook.com/marketplace/';
+  document.getElementById('f_buy_text').value = '';
   document.getElementById('f_file').value = '';
   pendingImage = null; pendingFilename = null;
   document.getElementById('thumbPreview').style.display = 'none';
@@ -755,6 +832,7 @@ async function save(ev) {
   item.cat = document.getElementById('f_cat').value.trim();
   item.desc = document.getElementById('f_desc').value.trim();
   item.buy = document.getElementById('f_buy').value.trim() || 'https://www.facebook.com/marketplace/';
+  item.buy_text = document.getElementById('f_buy_text').value.trim();
 
   try {
     if (pendingImage) {
@@ -784,7 +862,7 @@ async function save(ev) {
     });
     const j = await resp.json();
     if (!j.ok) throw new Error(j.error || '保存失败');
-    setStatus('已保存 · ' + j.count + ' 件商品', true);
+    setStatus('已保存 ' + j.count + ' 件商品 · ' + (j.git ? '已自动发布(' + (j.git_msg||'').split(': ').pop() + ')' : '未提交:' + (j.git_msg||'')), true);
     renderRows();
     hideForm();
   } catch (e) {
@@ -815,7 +893,7 @@ async function saveList() {
     });
     const j = await resp.json();
     if (!j.ok) throw new Error(j.error || '保存失败');
-    setStatus('已保存 · ' + j.count + ' 件商品', true);
+    setStatus('已保存 ' + j.count + ' 件商品 · ' + (j.git ? '已自动发布' : '未提交:' + (j.git_msg||'')), true);
     renderRows();
   } catch (e) {
     setStatus('出错：' + e.message, false);
@@ -823,15 +901,18 @@ async function saveList() {
 }
 
 /* ============ 网站设置 ============ */
-const SITE_DEFAULT = /*__SITE_JSON__*/;
 
 function openSettings() {
-  const s = (typeof SITE !== 'undefined' && SITE) ? SITE : SITE_DEFAULT;
+  const s = SITE_DEFAULT;
   document.getElementById('s_title').value = s.title || '';
   document.getElementById('s_logo').value = s.logo || '';
   document.getElementById('s_logo_dot').value = s.logo_dot || '';
   document.getElementById('s_logo_suffix').value = s.logo_suffix || '';
   document.getElementById('s_tagline').value = s.tagline || '';
+  document.getElementById('s_hero_title').value = s.hero_title || '';
+  document.getElementById('s_hero_sub').value = s.hero_sub || '';
+  document.getElementById('s_hero_note').value = s.hero_note || '';
+  document.getElementById('s_buy_default').value = s.buy_default || '';
   document.getElementById('s_footer_main').value = s.footer_main || '';
   document.getElementById('s_footer_sub').value = s.footer_sub || '';
   document.getElementById('s_dark_default').value = s.dark_default || 'auto';
@@ -858,6 +939,10 @@ async function saveSettings(ev) {
     tagline: document.getElementById('s_tagline').value.trim(),
     footer_main: document.getElementById('s_footer_main').value.trim(),
     footer_sub: document.getElementById('s_footer_sub').value.trim(),
+    hero_title: document.getElementById('s_hero_title').value.trim(),
+    hero_sub: document.getElementById('s_hero_sub').value.trim(),
+    hero_note: document.getElementById('s_hero_note').value.trim(),
+    buy_default: document.getElementById('s_buy_default').value.trim(),
     dark_default: document.getElementById('s_dark_default').value,
     colors: {
       light: {
@@ -881,7 +966,7 @@ async function saveSettings(ev) {
     });
     const j = await resp.json();
     if (!j.ok) throw new Error(j.error || '保存失败');
-    setStatus('网站设置已保存，首页已更新', true);
+    setStatus('网站设置已保存 · ' + (j.git ? '已自动发布' : '未提交:' + (j.git_msg||'')), true);
     hideSettings();
   } catch (e) {
     setStatus('出错：' + e.message, false);
@@ -914,7 +999,7 @@ def main():
 
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print("=" * 46)
-    print("  黑白市集 · 管理后台 已启动")
+    print("  商品管理后台 已启动")
     print("  管理后台: http://127.0.0.1:%d/admin" % PORT)
     print("  首页预览: http://127.0.0.1:%d/" % PORT)
     print("  按 Ctrl+C 停止")

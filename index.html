@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>小玲阿姨 · 黑白市集</title>
+<title>My Store · Black &amp; White Store</title>
 <link rel="stylesheet" href="style.css">
 <style>
   :root{--ink:#000000;--paper:#ffffff;--gray:#666666;--light:#efefef;--line:#c8c8c8;}[data-theme=dark]{--ink:#ffffff;--paper:#101010;--gray:#9a9a9a;--light:#1c1c1c;--line:#3a3a3a;}
@@ -16,58 +16,23 @@
 
 <header class="site-header">
   <div class="container header-inner">
-    <a href="/" class="logo">小玲阿姨<span class="logo-dot">·</span>市集</a>
-    <button type="button" class="theme-toggle" onclick="window.toggleTheme()" aria-label="切换明暗" title="切换明暗模式">◐</button>
+    <a href="/" class="logo">My Store<span class="logo-dot">·</span>Store</a>
+    <button type="button" class="theme-toggle" onclick="window.toggleTheme()" aria-label="Toggle dark mode" title="Toggle dark / light">◐</button>
   </div>
   
 </header>
 
 <main class="container">
   <section class="hero">
-    <h1>THINGS I SELL</h1>
-    <p class="hero-sub">以下均为演示商品。点任一方格查看简介，喜欢就点「立即购买」，会跳转到 Facebook Marketplace。</p>
-    <p class="hero-note">PURE STATIC · NO BACKEND</p>
+    <h1>Things I Sell</h1>
+    <p class="hero-sub">Click a card to view details. Press BUY to jump over to Facebook Marketplace.</p>
+    <p class="hero-note">JUMPS DIRECTLY TO FACEBOOK MARKETPLACE</p>
   </section>
 
   <section id="grid" class="grid">
-            <button class="card" type="button" aria-label="查看 复古机械键盘 简介" data-idx="0">
-              <div class="card-thumb"><div class="ph">◼</div></div>
-              <div class="card-name">复古机械键盘</div>
-              <div class="card-price">¥ 299</div>
-              <div class="card-cat">桌面 / 数码</div>
-            </button>
-            <button class="card" type="button" aria-label="查看 羊毛针织开衫 简介" data-idx="1">
-              <div class="card-thumb"><div class="ph">◼</div></div>
-              <div class="card-name">羊毛针织开衫</div>
-              <div class="card-price">¥ 159</div>
-              <div class="card-cat">服饰 / 毛衣</div>
-            </button>
-            <button class="card" type="button" aria-label="查看 手冲咖啡套装 简介" data-idx="2">
-              <div class="card-thumb"><div class="ph">◼</div></div>
-              <div class="card-name">手冲咖啡套装</div>
-              <div class="card-price">¥ 199</div>
-              <div class="card-cat">居家 / 咖啡</div>
-            </button>
-            <button class="card" type="button" aria-label="查看 极简帆布托特包 简介" data-idx="3">
-              <div class="card-thumb"><div class="ph">◼</div></div>
-              <div class="card-name">极简帆布托特包</div>
-              <div class="card-price">¥ 89</div>
-              <div class="card-cat">配饰 / 包包</div>
-            </button>
-            <button class="card" type="button" aria-label="查看 盆栽小绿植 简介" data-idx="4">
-              <div class="card-thumb"><div class="ph">◼</div></div>
-              <div class="card-name">盆栽小绿植</div>
-              <div class="card-price">¥ 45</div>
-              <div class="card-cat">居家 / 桌面</div>
-            </button>
-            <button class="card" type="button" aria-label="查看 皮质工装短靴 简介" data-idx="5">
-              <div class="card-thumb"><div class="ph">◼</div></div>
-              <div class="card-name">皮质工装短靴</div>
-              <div class="card-price">¥ 249</div>
-              <div class="card-cat">服饰 / 鞋靴</div>
-            </button>
-  </section>
 
+  </section>
+<section class="empty-state"><div class="empty-mark">EMPTY</div><h2>Nothing is on sale yet</h2><p>No items available at the moment. Please check back later.</p><p class="empty-hint">New arrivals coming soon.</p></section>
 </main>
 
 <footer class="site-footer">
@@ -83,12 +48,13 @@
     <h2 id="modal-title" data-title></h2>
     <p class="modal-price" data-price></p>
     <p class="modal-desc" data-desc></p>
-    <a class="btn btn-buy" data-buy href="#" target="_blank" rel="noopener noreferrer">立即购买 · 前往 Marketplace →</a>
+    <a class="btn btn-buy" data-buy href="#" target="_blank" rel="noopener noreferrer">BUY NOW · GO TO FACEBOOK MARKETPLACE →</a>
   </article>
 </div>
 
 <script>
-const PRODUCTS = [{"name": "复古机械键盘", "price": "¥ 299", "cat": "桌面 / 数码", "desc": "87 键茶轴，铝合金外壳，黑白撞色键帽。9 成新，功能完好，含原装数据线。", "img": "", "buy": "https://www.facebook.com/marketplace/"}, {"name": "羊毛针织开衫", "price": "¥ 159", "cat": "服饰 / 毛衣", "desc": "米灰混色羊毛混纺，M 码宽松版型，秋冬厚实保暖。无起球无瑕疵。", "img": "", "buy": "https://www.facebook.com/marketplace/"}, {"name": "手冲咖啡套装", "price": "¥ 199", "cat": "居家 / 咖啡", "desc": "玻璃分享壶 + 树脂滤杯 + 20 张滤纸 + 电子秤。日常自用，导热均匀。", "img": "", "buy": "https://www.facebook.com/marketplace/"}, {"name": "极简帆布托特包", "price": "¥ 89", "cat": "配饰 / 包包", "desc": "12 安厚帆布，黑底白字标语，内袋两个，可放 13 寸笔记本。全新未使用。", "img": "", "buy": "https://www.facebook.com/marketplace/"}, {"name": "盆栽小绿植", "price": "¥ 45", "cat": "居家 / 桌面", "desc": "白瓷小花盆配多肉，养了半年状态很好，皮实好养，附送营养土。仅限自取。", "img": "", "buy": "https://www.facebook.com/marketplace/"}, {"name": "皮质工装短靴", "price": "¥ 249", "cat": "服饰 / 鞋靴", "desc": "头层牛皮磨砂黑，41 码，厚底防滑。穿过一季，皮质完好。", "img": "", "buy": "https://www.facebook.com/marketplace/"}];
+const PRODUCTS = [];
+const BUY_DEFAULT = "BUY NOW · GO TO FACEBOOK MARKETPLACE →";
 // 卡片已由服务端渲染；JS 只负责弹窗。
 (function () {
   const grid = document.getElementById('grid');
@@ -106,8 +72,9 @@ const PRODUCTS = [{"name": "复古机械键盘", "price": "¥ 299", "cat": "桌�
       : '<span>◼</span>';
     mTitle.textContent = p.name || '';
     mPrice.textContent = p.price || '';
-    mDesc.textContent = p.desc || '暂无简介。';
+    mDesc.textContent = p.desc || 'No description yet.';
     mBuy.href = p.buy || 'https://www.facebook.com/marketplace/';
+    mBuy.textContent = p.buy_text || BUY_DEFAULT;
     modal.classList.remove('hidden');
     document.body.style.overflow = 'hidden';
   }

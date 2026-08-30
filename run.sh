@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 黑白市集 · 一键启动脚本
+# 黑白极简 · 商品店铺 · 一键启动
 # 用法: bash run.sh
 set -e
 

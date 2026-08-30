@@ -1,4 +1,4 @@
-# 黑白市集 · 纯静态购物模板（本地编辑 → 部署 GitHub Pages）
+# 黑白极简 · 商品店铺模板（本地编辑 → 部署 GitHub Pages）
 
 黑白极简风格购物网站。**完全纯静态、无后端**，最终产物是一堆可以直接丢上 GitHub Pages 的静态文件。商品点击看简介，「立即购买」跳转 Facebook Marketplace。
 
