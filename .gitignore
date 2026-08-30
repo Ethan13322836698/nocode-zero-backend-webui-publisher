@@ -1,0 +1,10 @@
+# 运行时本地配置(每台机器/每个用户不同, 不提交)
+site.json
+setup.json
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 本地系统文件
+.DS_Store
