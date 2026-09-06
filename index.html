@@ -24,20 +24,15 @@
 
 <main class="container">
   <section class="hero">
-    <h1>Things I Sell</h1>
+    <h1>test</h1>
     <p class="hero-sub">Click a card to view details. Press BUY to jump over to Facebook Marketplace.</p>
     <p class="hero-note">JUMPS DIRECTLY TO FACEBOOK MARKETPLACE</p>
   </section>
 
   <section id="grid" class="grid">
-            <button class="card" type="button" aria-label="View MacBook Pro 2020 intel I7 13inch 32/1t details" data-idx="0">
-              <div class="card-thumb"><img src="/images/image_1.jpg" alt="MacBook Pro 2020 intel I7 13inch 32/1t" loading="lazy"></div>
-              <div class="card-name">MacBook Pro 2020 intel I7 13inch 32/1t</div>
-              <div class="card-price">1200</div>
-              <div class="card-cat">Apple Laptap</div>
-            </button>
-  </section>
 
+  </section>
+<section class="empty-state"><div class="empty-mark">EMPTY</div><h2>Nothing is on sale yet</h2><p>No items available at the moment. Please check back later.</p><p class="empty-hint">New arrivals coming soon.</p></section>
 </main>
 
 <footer class="site-footer">
@@ -58,7 +53,7 @@
 </div>
 
 <script>
-const PRODUCTS = [{"name": "MacBook Pro 2020 intel I7 13inch 32/1t", "price": "1200", "cat": "Apple Laptap", "desc": "A MacBook Pro", "buy": "https://trademe.co.nz/a/listing/6105129456", "buy_text": "Buy that NOW!", "img": "images/image_1.jpg"}];
+const PRODUCTS = [];
 const BUY_DEFAULT = "BUY NOW · GO TO FACEBOOK MARKETPLACE →";
 // 卡片已由服务端渲染；JS 只负责弹窗。
 (function () {

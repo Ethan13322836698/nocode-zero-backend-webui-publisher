@@ -170,6 +170,16 @@ def git_has_changes():
     return ok
 
 
+def _fallback_identity():
+    """提交缺少 user.name/user.email 时的兜底身份：优先取仓库最近一次提交的作者, 全新空仓库用通用身份。"""
+    ok, out = run_git(["log", "-1", "--format=%an%n%ae"])
+    if ok and out.strip():
+        lines = out.strip().splitlines()
+        if len(lines) >= 2 and lines[0].strip() and lines[1].strip():
+            return lines[0].strip(), lines[1].strip()
+    return "Auto Publisher", "auto@example.com"
+
+
 def git_commit_push(message):
     """自动 add / commit / (push)。返回 (ok, 说明)。"""
     g = load_git()
@@ -195,8 +205,11 @@ def git_commit_push(message):
     prefix = g.get("commit_prefix", "")
     msg = prefix + (message or "update")
     ok, out = run_git(["commit", "-m", msg])
+    if not ok and ("user.name" in out or "user.email" in out):
+        # 常见: 没有配置 identity → 用最近一次提交作者兜底重试 (仅本次提交生效, 不写 git config)
+        name, email = _fallback_identity()
+        ok, out = run_git(["-c", "user.name=" + name, "-c", "user.email=" + email, "commit", "-m", msg])
     if not ok:
-        # 常见: 没有配置 identity
         if "user.name" in out or "user.email" in out:
             return False, "git 未配置 user.name/user.email, 全局先 `git config --global user.name ...`"
         return False, "git commit 失败: " + out
@@ -586,6 +599,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not ok:
                     self._json(400, {"ok": False, "error": "设置 remote 失败: " + out})
                     return
+            # 2) 把远程配置写入 site.json, 让设置页能显示并启用自动发布
+            site = load_site()
+            git = dict(site.get("git") or {})
+            git["remote_url"] = remote_url
+            git["branch"] = branch
+            git.setdefault("enabled", True)
+            git.setdefault("push", True)
+            site["git"] = git
+            save_site(site)
             self._json(200, {"ok": True, "remote_url": remote_url, "branch": branch, "cred": cred_note})
         except Exception as e:
             self._json(400, {"ok": False, "error": str(e)})
@@ -630,6 +652,11 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(incoming, dict):
                 raise ValueError("body must be an object")
             merged = _deep_merge(SITE, incoming)
+            # 若本次保存未带 git 字段, 保留已有 git 配置, 防止远程配置被清空
+            if "git" not in incoming:
+                existing_git = load_site().get("git")
+                if existing_git:
+                    merged["git"] = existing_git
             save_site(merged)
             # 若设置里给了 git remote, 先同步本地 remote
             git_merge = merged.get("git") or {}
@@ -1412,6 +1439,11 @@ async function saveSettings(ev) {
     });
     const j = await resp.json();
     if (!j.ok) throw new Error(j.error || '保存失败');
+    // 刷新内存中的站点配置, 下次打开设置弹窗显示已保存的值
+    try {
+      const r2 = await fetch('/api/settings');
+      SITE_DEFAULT = await r2.json();
+    } catch (e) {}
     setStatus((LANG==='zh'?'网站设置已保存 · ':'Settings saved · ') + (j.git ? I18N[LANG].gitPublished : I18N[LANG].notPushed + (j.git_msg||'')), true);
     hideSettings();
   } catch (e) {
