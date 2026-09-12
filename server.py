@@ -1486,7 +1486,7 @@ async function save(ev) {
     formImgs = [];
 
     if (idx === '') {
-      PRODUCTS.push(item);
+      PRODUCTS.unshift(item);
     } else {
       PRODUCTS[parseInt(idx, 10)] = item;
     }
