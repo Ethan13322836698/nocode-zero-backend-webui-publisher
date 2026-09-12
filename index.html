@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>My Store · Black &amp; White Store</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=2">
 <style>
   :root{--ink:#000000;--paper:#ffffff;--gray:#666666;--light:#efefef;--line:#c8c8c8;}[data-theme=dark]{--ink:#ffffff;--paper:#101010;--gray:#9a9a9a;--light:#1c1c1c;--line:#3a3a3a;}
 </style>
@@ -31,9 +31,15 @@
 
   <section id="grid" class="grid">
             <button class="card" type="button" aria-label="View Brand new DeWalt DCF850 brushless impact screwdriver, 20V details" data-idx="0">
-              <div class="card-thumb"><img src="images/image_2.jpg" alt="Brand new DeWalt DCF850 brushless impact screwdriver, 20V" loading="lazy"></div>
+              <div class="card-thumb"><img src="images/image_2.jpg" alt="Brand new DeWalt DCF850 brushless impact screwdriver, 20V" loading="lazy"><span class="thumb-count">7</span></div>
               <div class="card-name">Brand new DeWalt DCF850 brushless impact screwdriver, 20V</div>
               <div class="card-price">119</div>
+              <div class="card-cat"></div>
+            </button>
+            <button class="card" type="button" aria-label="View test details" data-idx="1">
+              <div class="card-thumb"><div class="ph">◼</div></div>
+              <div class="card-name">test</div>
+              <div class="card-price"></div>
               <div class="card-cat"></div>
             </button>
   </section>
@@ -49,7 +55,12 @@
   <div class="modal-backdrop" data-close></div>
   <article class="modal-card">
     <button class="modal-close" data-close aria-label="关闭">&times;</button>
-    <div class="modal-thumb" data-thumb></div>
+    <div class="modal-gallery">
+      <div class="modal-thumb" data-thumb></div>
+      <button type="button" class="gal-arrow gal-prev hidden" data-prev aria-label="上一张">‹</button>
+      <button type="button" class="gal-arrow gal-next hidden" data-next aria-label="下一张">›</button>
+      <div class="gal-dots" data-dots></div>
+    </div>
     <h2 id="modal-title" data-title></h2>
     <p class="modal-price" data-price></p>
     <p class="modal-desc" data-desc></p>
@@ -58,23 +69,51 @@
 </div>
 
 <script>
-const PRODUCTS = [{"name": "Brand new DeWalt DCF850 brushless impact screwdriver, 20V", "price": "119", "cat": "", "desc": "Brand new DeWalt DCF850 brushless impact screwdriver, 20V\n\nWestern springs pick up \nNot original \n\nPostal courier service within Auckland: $5.5; outside Auckland: $9.8. Rural areas: additional $5.", "buy": "https://www.facebook.com/marketplace/item/4382114318600240/?ref=marketplace_profile&referral_code=undefined", "buy_text": "Buy Now!", "img": "images/image_2.jpg"}];
+const PRODUCTS = [{"name": "Brand new DeWalt DCF850 brushless impact screwdriver, 20V", "price": "119", "cat": "", "desc": "Brand new DeWalt DCF850 brushless impact screwdriver, 20V\n\nWestern springs pick up \nNot original \n\nPostal courier service within Auckland: $5.5; outside Auckland: $9.8. Rural areas: additional $5.", "buy": "https://www.facebook.com/marketplace/item/4382114318600240/?ref=marketplace_profile&referral_code=undefined", "buy_text": "Buy Now!", "img": "images/image_2.jpg", "imgs": ["images/image_2.jpg", "images/805936507_1080872360989122_7818277479352556244_n.jpg", "images/804365157_2055844781708704_7365385061294368985_n.jpg", "images/805755272_28458601890437084_667908348690185867_n.jpg", "images/804647530_2117075888893120_1115854470319815008_n.jpg", "images/803926433_1696156621931890_6277975027897055280_n.jpg", "images/803828131_2055843235043111_8903389078752250000_n.jpg"]}, {"name": "test", "price": "", "cat": "", "desc": "fjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhrfjjfjfjfjfjfjfjfjfjcjfjfjfjdjskoqpallejddbdncnckfrjrhr", "buy": "https://www.facebook.com/marketplace/", "buy_text": "", "imgs": [], "img": ""}];
 const BUY_DEFAULT = "BUY NOW · GO TO FACEBOOK MARKETPLACE →";
 // 卡片已由服务端渲染；JS 只负责弹窗。
 (function () {
   const grid = document.getElementById('grid');
   const modal = document.getElementById('modal');
   const mThumb = modal.querySelector('[data-thumb]');
+  const galPrev = modal.querySelector('[data-prev]');
+  const galNext = modal.querySelector('[data-next]');
+  const galDots = modal.querySelector('[data-dots]');
   const mTitle = modal.querySelector('[data-title]');
   const mPrice = modal.querySelector('[data-price]');
   const mDesc = modal.querySelector('[data-desc]');
   const mBuy = modal.querySelector('[data-buy]');
 
+  // —— 多图轮播 ——
+  let gImgs = [];
+  let gCur = 0;
+
+  function renderGallery() {
+    const hasMany = gImgs.length > 1;
+    if (!gImgs.length) {
+      mThumb.innerHTML = '<span>◼</span>';
+    } else {
+      mThumb.innerHTML = '<img src="' + gImgs[gCur] + '" alt="" class="thumb-img">';
+    }
+    galPrev.classList.toggle('hidden', !hasMany);
+    galNext.classList.toggle('hidden', !hasMany);
+    galDots.innerHTML = gImgs.map(function (_, i) {
+      return '<button type="button" class="gal-dot' + (i === gCur ? ' on' : '') + '" data-dot="' + i + '" aria-label="image ' + (i + 1) + '"></button>';
+    }).join('');
+    galDots.style.display = hasMany ? '' : 'none';
+  }
+
+  function goGallery(i) {
+    if (!gImgs.length) return;
+    gCur = (i + gImgs.length) % gImgs.length;
+    renderGallery();
+  }
+
   function open(idx) {
     const p = PRODUCTS[idx] || {};
-    mThumb.innerHTML = p.img
-      ? '<img src="' + p.img + '" alt="" class="thumb-img">'
-      : '<span>◼</span>';
+    gImgs = Array.isArray(p.imgs) ? p.imgs.slice() : (p.img ? [p.img] : []);
+    gCur = 0;
+    renderGallery();
     mTitle.textContent = p.name || '';
     mPrice.textContent = p.price || '';
     mDesc.textContent = p.desc || 'No description yet.';
@@ -94,9 +133,18 @@ const BUY_DEFAULT = "BUY NOW · GO TO FACEBOOK MARKETPLACE →";
   });
   modal.addEventListener('click', function (e) {
     if (e.target.hasAttribute('data-close')) window.closeModal();
+    else if (e.target.closest('[data-prev]')) goGallery(gCur - 1);
+    else if (e.target.closest('[data-next]')) goGallery(gCur + 1);
+    else {
+      const dot = e.target.closest('[data-dot]');
+      if (dot) goGallery(parseInt(dot.getAttribute('data-dot'), 10));
+    }
   });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') window.closeModal();
+    else if (modal.classList.contains('hidden')) return;
+    else if (e.key === 'ArrowLeft') goGallery(gCur - 1);
+    else if (e.key === 'ArrowRight') goGallery(gCur + 1);
   });
 })();
 </script>

@@ -256,6 +256,17 @@ def start_async_push(message):
     return True, "已开始发布(后台执行), 稍后刷新即可看到结果"
 
 
+def start_save_publish(message):
+    """保存商品/设置后触发发布。自动发布关闭时直接返回未发布, 不误报已自动发布。
+
+    与「立即发布」按钮(start_async_push)区分: 手动发布不受 enabled 开关影响。
+    """
+    g = load_git()
+    if not g.get("enabled"):
+        return False, "git 自动发布未开启 (设置→Git 自动发布)"
+    return start_async_push(message)
+
+
 def push_status():
     """返回后台发布任务状态."""
     with _push_lock:
@@ -338,9 +349,30 @@ def esc_css_var(v):
 
 
 
+def product_imgs(p):
+    """返回商品的图片列表(规范化, 兼容新旧数据: 优先 imgs, 回退 img)。"""
+    imgs = p.get("imgs") or []
+    if isinstance(imgs, str):
+        imgs = [imgs]
+    if not isinstance(imgs, list):
+        imgs = []
+    imgs = [im for im in imgs if isinstance(im, str)]
+    if not imgs and p.get("img"):
+        imgs = [p["img"]]
+    # 去重(按纯文件名), 防止同一张图重复出现
+    seen, out = set(), []
+    for im in imgs:
+        key = os.path.basename(im.replace("\\", "/"))
+        if key and key not in seen:
+            seen.add(key)
+            out.append(im)
+    return out
+
+
 def thumb_html(p):
     """返回缩略图 HTML。有图出 img，没图显示黑块占位。"""
-    im = (p.get("img") or "").lstrip("./")
+    imgs = product_imgs(p)
+    im = (imgs[0] if imgs else "").lstrip("./")
     if im and os.path.exists(os.path.join(IMAGES_DIR, os.path.basename(im))):
         return '<img src="%s" alt="%s" loading="lazy">' % (
             esc(im), esc(p.get("name", "")))
@@ -348,15 +380,18 @@ def thumb_html(p):
 
 
 def verify_images(products):
-    """把 img 字段规范成 images/ 下的相对路径, 并裁掉不符的。"""
+    """把图片字段规范成 imgs 列表(images/ 下的相对路径), 并裁掉不存在的。"""
     for p in products:
-        im = p.get("img") or ""
-        im = im.replace("\\", "/")
-        name = os.path.basename(im)
-        if name and os.path.exists(os.path.join(IMAGES_DIR, name)):
-            p["img"] = "images/" + name
-        else:
-            p["img"] = ""
+        imgs = product_imgs(p)
+        clean = []
+        for im in imgs:
+            im = (im or "").replace("\\", "/")
+            name = os.path.basename(im)
+            target = "images/" + name
+            if name and target not in clean and os.path.exists(os.path.join(IMAGES_DIR, name)):
+                clean.append(target)
+        p["imgs"] = clean
+        p["img"] = clean[0] if clean else ""
     return products
 
 
@@ -369,9 +404,11 @@ def _asset_escape(s):
 def render_index(products):
     cards = []
     for i, p in enumerate(products):
+        n = len(product_imgs(p))
+        badge = '<span class="thumb-count">%d</span>' % n if n > 1 else ""
         cards.append(
             """            <button class="card" type="button" aria-label="View %s details" data-idx="%d">
-              <div class="card-thumb">%s</div>
+              <div class="card-thumb">%s%s</div>
               <div class="card-name">%s</div>
               <div class="card-price">%s</div>
               <div class="card-cat">%s</div>
@@ -380,6 +417,7 @@ def render_index(products):
                 esc(p.get("name", "")),
                 i,
                 thumb_html(p),
+                badge,
                 esc(p.get("name", "")),
                 esc(p.get("price", "")),
                 esc(p.get("cat", "")),
@@ -669,7 +707,7 @@ class Handler(BaseHTTPRequestHandler):
             # 同时覆盖 index.html 让设置生效
             with open(INDEX_FILE, "w", encoding="utf-8") as f:
                 f.write(render_index(load_products()))
-            _ok, _msg = start_async_push("site settings update")
+            _ok, _msg = start_save_publish("site settings update")
             self._json(200, {"ok": True, "git": _ok, "git_msg": _msg})
         except Exception as e:
             self._json(400, {"ok": False, "error": str(e)})
@@ -685,7 +723,7 @@ class Handler(BaseHTTPRequestHandler):
             # 重写 index.html
             with open(INDEX_FILE, "w", encoding="utf-8") as f:
                 f.write(render_index(products))
-            _ok, _msg = start_async_push("products update")
+            _ok, _msg = start_save_publish("products update")
             self._json(200, {"ok": True, "count": len(products), "git": _ok, "git_msg": _msg})
         except Exception as e:
             self._json(400, {"ok": False, "error": str(e)})
@@ -864,7 +902,7 @@ INDEX_TEMPLATE = '''<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>/*__TITLE__*/</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=2">
 <style>
   /*__COLOR_CSS__*/
 </style>
@@ -904,7 +942,12 @@ INDEX_TEMPLATE = '''<!DOCTYPE html>
   <div class="modal-backdrop" data-close></div>
   <article class="modal-card">
     <button class="modal-close" data-close aria-label="关闭">&times;</button>
-    <div class="modal-thumb" data-thumb></div>
+    <div class="modal-gallery">
+      <div class="modal-thumb" data-thumb></div>
+      <button type="button" class="gal-arrow gal-prev hidden" data-prev aria-label="上一张">‹</button>
+      <button type="button" class="gal-arrow gal-next hidden" data-next aria-label="下一张">›</button>
+      <div class="gal-dots" data-dots></div>
+    </div>
     <h2 id="modal-title" data-title></h2>
     <p class="modal-price" data-price></p>
     <p class="modal-desc" data-desc></p>
@@ -920,16 +963,44 @@ const BUY_DEFAULT = "/*__BUY_DEFAULT__*/";
   const grid = document.getElementById('grid');
   const modal = document.getElementById('modal');
   const mThumb = modal.querySelector('[data-thumb]');
+  const galPrev = modal.querySelector('[data-prev]');
+  const galNext = modal.querySelector('[data-next]');
+  const galDots = modal.querySelector('[data-dots]');
   const mTitle = modal.querySelector('[data-title]');
   const mPrice = modal.querySelector('[data-price]');
   const mDesc = modal.querySelector('[data-desc]');
   const mBuy = modal.querySelector('[data-buy]');
 
+  // —— 多图轮播 ——
+  let gImgs = [];
+  let gCur = 0;
+
+  function renderGallery() {
+    const hasMany = gImgs.length > 1;
+    if (!gImgs.length) {
+      mThumb.innerHTML = '<span>◼</span>';
+    } else {
+      mThumb.innerHTML = '<img src="' + gImgs[gCur] + '" alt="" class="thumb-img">';
+    }
+    galPrev.classList.toggle('hidden', !hasMany);
+    galNext.classList.toggle('hidden', !hasMany);
+    galDots.innerHTML = gImgs.map(function (_, i) {
+      return '<button type="button" class="gal-dot' + (i === gCur ? ' on' : '') + '" data-dot="' + i + '" aria-label="image ' + (i + 1) + '"></button>';
+    }).join('');
+    galDots.style.display = hasMany ? '' : 'none';
+  }
+
+  function goGallery(i) {
+    if (!gImgs.length) return;
+    gCur = (i + gImgs.length) % gImgs.length;
+    renderGallery();
+  }
+
   function open(idx) {
     const p = PRODUCTS[idx] || {};
-    mThumb.innerHTML = p.img
-      ? '<img src="' + p.img + '" alt="" class="thumb-img">'
-      : '<span>◼</span>';
+    gImgs = Array.isArray(p.imgs) ? p.imgs.slice() : (p.img ? [p.img] : []);
+    gCur = 0;
+    renderGallery();
     mTitle.textContent = p.name || '';
     mPrice.textContent = p.price || '';
     mDesc.textContent = p.desc || 'No description yet.';
@@ -949,9 +1020,18 @@ const BUY_DEFAULT = "/*__BUY_DEFAULT__*/";
   });
   modal.addEventListener('click', function (e) {
     if (e.target.hasAttribute('data-close')) window.closeModal();
+    else if (e.target.closest('[data-prev]')) goGallery(gCur - 1);
+    else if (e.target.closest('[data-next]')) goGallery(gCur + 1);
+    else {
+      const dot = e.target.closest('[data-dot]');
+      if (dot) goGallery(parseInt(dot.getAttribute('data-dot'), 10));
+    }
   });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') window.closeModal();
+    else if (modal.classList.contains('hidden')) return;
+    else if (e.key === 'ArrowLeft') goGallery(gCur - 1);
+    else if (e.key === 'ArrowRight') goGallery(gCur + 1);
   });
 })();
 </script>
@@ -991,6 +1071,16 @@ table { width: 100%; border-collapse: collapse; margin-top: 20px; }
 th, td { border: 1px solid var(--ink); padding: 10px; text-align: left; font-size: 14px; vertical-align: middle; }
 th { background: var(--ink); color: var(--paper); letter-spacing: 1px; }
 .rowimg { width: 56px; height: 56px; object-fit: cover; border: 1px solid var(--ink); }
+.rowimg-cell { position: relative; display: inline-block; }
+.rowimg-count { position: absolute; right: -6px; top: -6px; background: var(--ink); color: var(--paper); font-size: 10px; font-weight: 800; padding: 1px 5px; }
+.img-list { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 10px; }
+.img-item { position: relative; border: 1px solid var(--ink); padding: 4px; }
+.img-frame { position: relative; }
+.img-frame img { width: 96px; height: 96px; object-fit: contain; display: block; background: var(--paper); }
+.img-cover { position: absolute; left: 4px; bottom: 4px; background: var(--ink); color: var(--paper); font-size: 10px; font-weight: 800; letter-spacing: 1px; padding: 1px 5px; }
+.img-ops { display: flex; gap: 4px; margin-top: 4px; }
+.img-ops .btn { flex: 1; padding: 4px 2px; font-size: 12px; }
+.img-ops .btn[disabled] { opacity: .35; cursor: not-allowed; }
 .btn { padding: 8px 12px; font-size: 13px; font-weight: 700; border: 1px solid var(--ink); background: var(--paper); cursor: pointer; }
 .btn:hover { background: var(--ink); color: var(--paper); }
 .btn-danger:hover { background: #000; }
@@ -1011,7 +1101,7 @@ form.panel .form-row > * { min-width: 0; }
 label { display: block; font-weight: 700; margin: 12px 0 4px; font-size: 13px; }
 input[type=text], input[type=url], textarea { width: 100%; border: 1px solid var(--ink); padding: 8px; font-size: 14px; font-family: inherit; box-sizing: border-box; }
 input[type=color] { width: 100%; height: 36px; border: 1px solid var(--ink); padding: 0; box-sizing: border-box; cursor: pointer; }
-textarea { resize: vertical; min-height: 80px; }
+textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
 .form-row { display: flex; gap: 10px; flex-wrap: wrap; }
 .color-item { flex: 1 1 130px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .color-item span { font-size: 12px; font-weight: 700; }
@@ -1063,10 +1153,10 @@ textarea { resize: vertical; min-height: 80px; }
     <label data-i18n="lblBuyText">购买按钮文案（留空用全局默认）</label>
     <input type="text" id="f_buy_text" placeholder="留空则用网站设置的全局默认">
     <label data-i18n="lblImg">商品图片</label>
-    <div class="form-row">
-      <input type="file" id="f_file" accept="image/*">
-    </div>
-    <img id="thumbPreview" alt="图片预览">
+    <p class="muted" data-i18n="lblImgHint">可上传多张，第一张为列表封面。点 “+ 添加” 继续选择。</p>
+    <div id="imgList" class="img-list"></div>
+    <button type="button" class="btn" data-i18n="addImgBtn" onclick="document.getElementById('f_file').click()">＋ 添加图片</button>
+    <input type="file" id="f_file" accept="image/*" multiple style="display:none">
     <div class="form-actions">
       <button type="button" class="btn" onclick="hideForm()" data-i18n="btnCancel">取消</button>
       <button type="submit" class="btn" data-i18n="btnSave">保存</button>
@@ -1149,16 +1239,25 @@ textarea { resize: vertical; min-height: 80px; }
 <script>
 let PRODUCTS = /*__PRODUCTS_JSON__*/;
 let SITE_DEFAULT = /*__SITE_JSON__*/;
-let pendingImage = null;   // base64
-let pendingFilename = null;
+// 商品图片列表: formImgs=已保存/已上传的图片路径; pendingImgs=待上传的新图 {filename, data}
+let formImgs = [];
+let pendingImgs = [];
 
 const rows = document.getElementById('rows');
 const status = document.getElementById('status');
 
+function imgsOf(p) {
+  const imgs = Array.isArray(p && p.imgs) ? p.imgs : (p && p.img ? [p.img] : []);
+  return imgs.filter(Boolean);
+}
 function renderRows() {
-  rows.innerHTML = PRODUCTS.map((p, i) =>
-    '<tr>' +
-    '<td><img class="rowimg" src="' + (p.img || 'favicon.ico') + '" alt=""></td>' +
+  rows.innerHTML = PRODUCTS.map((p, i) => {
+    const imgs = imgsOf(p);
+    const cell = imgs.length
+      ? '<img class="rowimg" src="' + imgs[0] + '" alt="">' + (imgs.length > 1 ? '<span class="rowimg-count">' + imgs.length + '</span>' : '')
+      : '<span class="small">—</span>';
+    return '<tr>' +
+    '<td><div class="rowimg-cell">' + cell + '</div></td>' +
     '<td><b>' + p.name + '</b></td>' +
     '<td>' + p.price + '</td>' +
     '<td>' + p.cat + '</td>' +
@@ -1170,8 +1269,8 @@ function renderRows() {
       '<button class="btn" onclick="move(' + i + ',1)">↓</button> ' +
       '<button class="btn btn-danger" onclick="del(' + i + ')">' + I18N[LANG].rowDel + '</button>' +
     '</td>' +
-    '</tr>'
-  ).join('');
+    '</tr>';
+  }).join('');
 }
 
 function setStatus(msg, ok) {
@@ -1194,10 +1293,9 @@ function edit(i) {
   document.getElementById('f_desc').value = p.desc || '';
   document.getElementById('f_buy').value = p.buy || '';
   document.getElementById('f_buy_text').value = p.buy_text || '';
-  pendingImage = null; pendingFilename = null;
-  const prev = document.getElementById('thumbPreview');
-  prev.style.display = p.img ? 'block' : 'none';
-  prev.src = p.img || '';
+  formImgs = imgsOf(p).slice();
+  pendingImgs = [];
+  renderImgList();
   document.getElementById('formTitle').textContent = (I18N[LANG].editItem || '编辑商品');
   showForm();
 }
@@ -1210,23 +1308,67 @@ function resetForm() {
   document.getElementById('f_buy').value = 'https://www.facebook.com/marketplace/';
   document.getElementById('f_buy_text').value = '';
   document.getElementById('f_file').value = '';
-  pendingImage = null; pendingFilename = null;
-  document.getElementById('thumbPreview').style.display = 'none';
+  formImgs = [];
+  pendingImgs = [];
+  renderImgList();
 }
 function showForm() { document.getElementById('overlay').classList.remove('hidden'); }
 function hideForm() { document.getElementById('overlay').classList.add('hidden'); }
 
-document.getElementById('f_file').addEventListener('change', function (e) {
-  const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = function () {
-    pendingImage = reader.result;        // data URL
-    const dv = document.getElementById('thumbPreview');
-    dv.src = pendingImage;
-    dv.style.display = 'block';
+/* 多图列表(编辑弹窗内) */
+function renderImgList() {
+  const box = document.getElementById('imgList');
+  const ls = (I18N[LANG] || I18N.zh);
+  const mk = function (src, isNew, gi, pi) {
+    return '<div class="img-item">' +
+      '<div class="img-frame">' +
+      '<img src="' + src + '" alt="">' +
+      (gi === 0 && pi === -1 ? '<span class="img-cover">' + (ls.lblCover || '封面') + '</span>' : '') +
+      '</div>' +
+      '<div class="img-ops">' +
+        '<button type="button" class="btn" onclick="imgMove(' + gi + ',' + pi + ',-1)" ' + (gi === 0 && pi === -1 ? 'disabled' : '') + '>←</button>' +
+        '<button type="button" class="btn" onclick="imgMove(' + gi + ',' + pi + ',1)">→</button>' +
+        '<button type="button" class="btn btn-danger" onclick="imgDel(' + gi + ',' + pi + ')">' + (ls.rowDel || '删') + '</button>' +
+      '</div>' +
+    '</div>';
   };
-  reader.readAsDataURL(file);
+  let html = formImgs.map(function (im, gi) { return mk(im, false, gi, -1); }).join('');
+  html += pendingImgs.map(function (p, pi) { return mk(p.data, true, -1, pi); }).join('');
+  box.innerHTML = html;
+  const count = formImgs.length + pendingImgs.length;
+  box.style.display = count ? '' : 'none';
+  box.dataset.count = count;
+}
+function imgMove(gi, pi, d) {
+  if (pi === -1) {
+    const j = gi + d;
+    if (j < 0 || j >= formImgs.length) return;
+    const t = formImgs[gi]; formImgs[gi] = formImgs[j]; formImgs[j] = t;
+  } else {
+    const j = pi + d;
+    if (j < 0 || j >= pendingImgs.length) return;
+    const t = pendingImgs[pi]; pendingImgs[pi] = pendingImgs[j]; pendingImgs[j] = t;
+  }
+  renderImgList();
+}
+function imgDel(gi, pi) {
+  if (pi === -1) formImgs.splice(gi, 1);
+  else pendingImgs.splice(pi, 1);
+  renderImgList();
+}
+
+document.getElementById('f_file').addEventListener('change', function (e) {
+  const files = Array.prototype.slice.call(e.target.files || []);
+  if (!files.length) return;
+  files.forEach(function (file) {
+    const reader = new FileReader();
+    reader.onload = function () {
+      pendingImgs.push({ filename: file.name || 'image.jpg', data: reader.result });
+      renderImgList();
+    };
+    reader.readAsDataURL(file);
+  });
+  e.target.value = '';
 });
 
 /* 保存：先上传图（若有），再保存商品列表 */
@@ -1245,18 +1387,24 @@ async function save(ev) {
   item.buy_text = document.getElementById('f_buy_text').value.trim();
 
   try {
-    if (pendingImage) {
-      setStatus('上传图片…', true);
-      const resp = await fetch('/api/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: pendingFilename || 'image.jpg', data: pendingImage })
-      });
-      const j = await resp.json();
-      if (!j.ok) throw new Error(j.error || '上传失败');
-      item.img = j.img;
-      pendingImage = null;
+    const order = formImgs.slice();
+    if (pendingImgs.length) {
+      setStatus(I18N[LANG].uploading, true);
+      for (const pi of pendingImgs) {
+        const resp = await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: pi.filename || 'image.jpg', data: pi.data })
+        });
+        const j = await resp.json();
+        if (!j.ok) throw new Error(j.error || '上传失败');
+        order.push(j.img);
+      }
     }
+    item.imgs = order;
+    item.img = order[0] || '';
+    pendingImgs = [];
+    formImgs = [];
 
     if (idx === '') {
       PRODUCTS.push(item);
@@ -1459,6 +1607,8 @@ const I18N = {
     thImg:'图片', thName:'名称', thPrice:'价格', thCat:'分类', thDesc:'简介', thLink:'购买链接', thOp:'操作',
     editItem:'编辑商品', lblName:'名称', lblPrice:'价格 (例：¥ 299)', lblCat:'分类', lblDesc:'简介',
     lblBuyLink:'购买链接 (Facebook Marketplace 页)', lblBuyText:'购买按钮文案（留空用全局默认）', lblImg:'商品图片',
+    lblImgHint:'可上传多张，第一张为列表封面。点 “＋ 添加图片” 继续选择。', lblCover:'封面',
+    addImgBtn:'＋ 添加图片', uploading:'上传图片…',
     btnCancel:'取消', btnSave:'保存',
     settingsTitle:'网站设置', lblSiteTitle:'站点标题（浏览器标签）', lblLogo:'Logo 文字',
     lblTagline:'顶部副标题 Tagline（留空则不显示）', lblHeroTitle:'首页大标题', lblHeroSub:'首页副标题说明', lblHeroNote:'首页小徽标',
@@ -1476,7 +1626,9 @@ const I18N = {
     tip:'Every change rewrites index.html. Uploaded images go into images/.',
     thImg:'Image', thName:'Name', thPrice:'Price', thCat:'Category', thDesc:'Description', thLink:'Buy Link', thOp:'Actions',
     editItem:'Edit Item', lblName:'Name', lblPrice:'Price (e.g. ¥ 299)', lblCat:'Category', lblDesc:'Description',
-    lblBuyLink:'Buy Link (Facebook Marketplace)', lblBuyText:'Buy button text (blank = global default)', lblImg:'Image',
+    lblBuyLink:'Buy Link (Facebook Marketplace)', lblBuyText:'Buy button text (blank = global default)', lblImg:'Images',
+    lblImgHint:'You can add multiple images. The first one is the cover. Click “＋ Add image” to add more.', lblCover:'Cover',
+    addImgBtn:'＋ Add image', uploading:'Uploading…',
     btnCancel:'Cancel', btnSave:'Save',
     settingsTitle:'Settings', lblSiteTitle:'Site title (browser tab)', lblLogo:'Logo text',
     lblTagline:'Tagline (blank = hidden)', lblHeroTitle:'Homepage headline', lblHeroSub:'Homepage subtitle', lblHeroNote:'Homepage badge',
