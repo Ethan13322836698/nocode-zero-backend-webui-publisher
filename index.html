@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>My Store · Black &amp; White Store</title>
+<title>Ava Liu&#x27;s Store</title>
 <link rel="stylesheet" href="style.css?v=2">
 <style>
   :root{--ink:#000000;--paper:#ffffff;--gray:#666666;--light:#efefef;--line:#c8c8c8;}[data-theme=dark]{--ink:#ffffff;--paper:#101010;--gray:#9a9a9a;--light:#1c1c1c;--line:#3a3a3a;}
@@ -16,7 +16,7 @@
 
 <header class="site-header">
   <div class="container header-inner">
-    <a href="/" class="logo">My Store<span class="logo-dot">·</span>Store</a>
+    <a href="/" class="logo">Ava<span class="logo-dot"></span>Liu&#x27;s Store</a>
     <button type="button" class="theme-toggle" onclick="window.toggleTheme()" aria-label="Toggle dark mode" title="Toggle dark / light">◐</button>
   </div>
   
@@ -24,9 +24,9 @@
 
 <main class="container">
   <section class="hero">
-    <h1>test</h1>
-    <p class="hero-sub">Click a card to view details. Press BUY to jump over to Facebook Marketplace.</p>
-    <p class="hero-note">JUMPS DIRECTLY TO FACEBOOK MARKETPLACE</p>
+    <h1>Things I Sell</h1>
+    <p class="hero-sub"></p>
+    <p class="hero-note"></p>
   </section>
 
   <section id="grid" class="grid">
@@ -64,7 +64,7 @@
 
 <script>
 const PRODUCTS = [{"name": "Brand new DeWalt DCF850 brushless impact screwdriver, 20V", "price": "119", "cat": "", "desc": "Brand new DeWalt DCF850 brushless impact screwdriver, 20V\n\nWestern springs pick up \nNot original \n\nPostal courier service within Auckland: $5.5; outside Auckland: $9.8. Rural areas: additional $5.", "buy": "https://www.facebook.com/marketplace/item/4382114318600240/?ref=marketplace_profile&referral_code=undefined", "buy_text": "Buy Now!", "img": "images/image_2.jpg", "imgs": ["images/image_2.jpg", "images/805936507_1080872360989122_7818277479352556244_n.jpg", "images/804365157_2055844781708704_7365385061294368985_n.jpg", "images/805755272_28458601890437084_667908348690185867_n.jpg", "images/804647530_2117075888893120_1115854470319815008_n.jpg", "images/803926433_1696156621931890_6277975027897055280_n.jpg", "images/803828131_2055843235043111_8903389078752250000_n.jpg"]}];
-const BUY_DEFAULT = "BUY NOW · GO TO FACEBOOK MARKETPLACE →";
+const BUY_DEFAULT = "BUY NOW!";
 // 卡片已由服务端渲染；JS 只负责弹窗。
 (function () {
   const grid = document.getElementById('grid');
