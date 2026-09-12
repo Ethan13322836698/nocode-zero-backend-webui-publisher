@@ -355,8 +355,16 @@ def esc_css_var(v):
 
 
 
+def is_external_img(s):
+    """判断是否为外链图片 URL(http/https)。"""
+    return bool(re.match(r"^(https?:)?//", s or ""))
+
+
 def product_imgs(p):
-    """返回商品的图片列表(规范化, 兼容新旧数据: 优先 imgs, 回退 img)。"""
+    """返回商品的图片列表(规范化, 兼容新旧数据: 优先 imgs, 回退 img)。
+
+    外链图片(http/https URL)原样保留; 本地图按完整值去重。
+    """
     imgs = p.get("imgs") or []
     if isinstance(imgs, str):
         imgs = [imgs]
@@ -365,10 +373,9 @@ def product_imgs(p):
     imgs = [im for im in imgs if isinstance(im, str)]
     if not imgs and p.get("img"):
         imgs = [p["img"]]
-    # 去重(按纯文件名), 防止同一张图重复出现
     seen, out = set(), []
     for im in imgs:
-        key = os.path.basename(im.replace("\\", "/"))
+        key = im.strip()
         if key and key not in seen:
             seen.add(key)
             out.append(im)
@@ -378,7 +385,11 @@ def product_imgs(p):
 def thumb_html(p):
     """返回缩略图 HTML。有图出 img，没图显示黑块占位。"""
     imgs = product_imgs(p)
-    im = (imgs[0] if imgs else "").lstrip("./")
+    im = (imgs[0] if imgs else "").strip()
+    if is_external_img(im):
+        return '<img src="%s" alt="%s" loading="lazy">' % (
+            esc(im), esc(p.get("name", "")))
+    im = im.lstrip("./")
     if im and os.path.exists(os.path.join(IMAGES_DIR, os.path.basename(im))):
         return '<img src="%s" alt="%s" loading="lazy">' % (
             esc(im), esc(p.get("name", "")))
@@ -386,12 +397,17 @@ def thumb_html(p):
 
 
 def verify_images(products):
-    """把图片字段规范成 imgs 列表(images/ 下的相对路径), 并裁掉不存在的。"""
+    """把图片字段规范成 imgs 列表; 外链 URL 原样保留, 本地图规范化成
+    images/ 下相对路径, 并裁掉不存在的。"""
     for p in products:
         imgs = product_imgs(p)
         clean = []
         for im in imgs:
-            im = (im or "").replace("\\", "/")
+            im = (im or "").strip().replace("\\", "/")
+            if is_external_img(im):
+                if im not in clean:
+                    clean.append(im)
+                continue
             name = os.path.basename(im)
             target = "images/" + name
             if name and target not in clean and os.path.exists(os.path.join(IMAGES_DIR, name)):
@@ -1164,7 +1180,10 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
     <label data-i18n="lblImg">商品图片</label>
     <p class="muted" data-i18n="lblImgHint">可上传多张，第一张为列表封面。点 “+ 添加” 继续选择。</p>
     <div id="imgList" class="img-list"></div>
-    <button type="button" class="btn" data-i18n="addImgBtn" onclick="document.getElementById('f_file').click()">＋ 添加图片</button>
+    <div class="form-row" style="margin-top:4px">
+      <button type="button" class="btn" data-i18n="addImgBtn" onclick="document.getElementById('f_file').click()">＋ 添加图片</button>
+      <button type="button" class="btn" data-i18n="btnLinkImg" onclick="addLinkImg()">＋ 外链图片</button>
+    </div>
     <input type="file" id="f_file" accept="image/*" multiple style="display:none">
     <div class="form-actions">
       <button type="button" class="btn" onclick="hideForm()" data-i18n="btnCancel">取消</button>
@@ -1368,16 +1387,68 @@ function imgDel(gi, pi) {
 document.getElementById('f_file').addEventListener('change', function (e) {
   const files = Array.prototype.slice.call(e.target.files || []);
   if (!files.length) return;
+  setStatus((I18N[LANG] || I18N.zh).compressing, true);
   files.forEach(function (file) {
-    const reader = new FileReader();
-    reader.onload = function () {
-      pendingImgs.push({ filename: file.name || 'image.jpg', data: reader.result });
-      renderImgList();
-    };
-    reader.readAsDataURL(file);
+    compressImage(file).then(function (res) {
+      if (res && res.data) {
+        pendingImgs.push({ filename: res.filename, data: res.data });
+        renderImgList();
+      }
+    });
   });
   e.target.value = '';
 });
+
+/* 上传前压缩: 非 GIF 统一缩放到最大 1600px 并用 JPEG 质量 0.8 重编码, 省空间 */
+const IMG_MAX = 1600;
+const IMG_QUALITY = 0.8;
+function compressImage(file) {
+  return new Promise(function (resolve) {
+    if (file.type === 'image/gif') {
+      const r = new FileReader();
+      r.onload = function () { resolve({ filename: file.name, data: r.result }); };
+      r.onerror = function () { resolve(null); };
+      r.readAsDataURL(file);
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = function () {
+      let w = img.naturalWidth, h = img.naturalHeight;
+      if (w > IMG_MAX || h > IMG_MAX) {
+        if (w >= h) { h = Math.max(1, Math.round(h * IMG_MAX / w)); w = IMG_MAX; }
+        else { w = Math.max(1, Math.round(w * IMG_MAX / h)); h = IMG_MAX; }
+      }
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      let data = null, fn = file.name;
+      try { data = c.toDataURL('image/jpeg', IMG_QUALITY); } catch (err) {}
+      if (data) {
+        const dot = file.name.lastIndexOf('.');
+        fn = (dot > 0 ? file.name.slice(0, dot) : file.name) + '.jpg';
+      }
+      URL.revokeObjectURL(url);
+      resolve(data ? { filename: fn, data: data } : null);
+    };
+    img.onerror = function () { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+}
+
+/* 外链图片: 直接粘贴 http/https 图片链接, 不占本地存储 */
+function addLinkImg() {
+  const u = prompt((I18N[LANG] || I18N.zh).promptImgUrl);
+  if (!u) return;
+  const t = u.trim();
+  const okUrl = t.indexOf('http://') === 0 || t.indexOf('https://') === 0 || t.indexOf('//') === 0;
+  if (!okUrl) {
+    alert((I18N[LANG] || I18N.zh).errBadUrl);
+    return;
+  }
+  formImgs.push(t);
+  renderImgList();
+}
 
 /* 保存：先上传图（若有），再保存商品列表 */
 async function save(ev) {
@@ -1615,7 +1686,8 @@ const I18N = {
     editItem:'编辑商品', lblName:'名称', lblPrice:'价格 (例：¥ 299)', lblCat:'分类', lblDesc:'简介',
     lblBuyLink:'购买链接 (Facebook Marketplace 页)', lblBuyText:'购买按钮文案（留空用全局默认）', lblImg:'商品图片',
     lblImgHint:'可上传多张，第一张为列表封面。点 “＋ 添加图片” 继续选择。', lblCover:'封面',
-    addImgBtn:'＋ 添加图片', uploading:'上传图片…',
+    addImgBtn:'＋ 添加图片', btnLinkImg:'＋ 外链图片', uploading:'上传图片…',
+    compressing:'压缩图片…', promptImgUrl:'粘贴外部图片链接 (http/https)，不占用本地存储：', errBadUrl:'链接无效，请输入 http:// 或 https:// 开头的图片地址',
     btnCancel:'取消', btnSave:'保存',
     settingsTitle:'网站设置', lblSiteTitle:'站点标题（浏览器标签）', lblLogo:'Logo 文字',
     lblTagline:'顶部副标题 Tagline（留空则不显示）', lblHeroTitle:'首页大标题', lblHeroSub:'首页副标题说明', lblHeroNote:'首页小徽标',
@@ -1635,7 +1707,8 @@ const I18N = {
     editItem:'Edit Item', lblName:'Name', lblPrice:'Price (e.g. ¥ 299)', lblCat:'Category', lblDesc:'Description',
     lblBuyLink:'Buy Link (Facebook Marketplace)', lblBuyText:'Buy button text (blank = global default)', lblImg:'Images',
     lblImgHint:'You can add multiple images. The first one is the cover. Click “＋ Add image” to add more.', lblCover:'Cover',
-    addImgBtn:'＋ Add image', uploading:'Uploading…',
+    addImgBtn:'＋ Add image', btnLinkImg:'＋ Image URL', uploading:'Uploading…',
+    compressing:'Compressing image…', promptImgUrl:'Paste an external image URL (http/https), no local storage used:', errBadUrl:'Invalid URL. Provide an address starting with http:// or https://',
     btnCancel:'Cancel', btnSave:'Save',
     settingsTitle:'Settings', lblSiteTitle:'Site title (browser tab)', lblLogo:'Logo text',
     lblTagline:'Tagline (blank = hidden)', lblHeroTitle:'Homepage headline', lblHeroSub:'Homepage subtitle', lblHeroNote:'Homepage badge',
