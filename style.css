@@ -113,7 +113,7 @@ img { max-width: 100%; display: block; }
   display: flex; align-items: flex-end; justify-content: center;
   overflow: hidden; margin-bottom: 14px; background: var(--paper);
 }
-.card-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.card-thumb img { width: 100%; height: 100%; object-fit: contain; }
 .card-thumb .ph { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 64px; color: var(--ink); }
 .card-name { font-size: 17px; font-weight: 700; margin-bottom: 4px; }
 .card-price { font-size: 15px; font-weight: 800; }
@@ -158,7 +158,7 @@ img { max-width: 100%; display: block; }
   display: flex; align-items: center; justify-content: center; font-size: 88px;
   background: var(--paper); margin-bottom: 16px; overflow: hidden;
 }
-.modal-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.modal-thumb img { width: 100%; height: 100%; object-fit: contain; }
 .modal-thumb span { line-height: 1; }
 .modal-card h2 { font-size: 24px; font-weight: 900; margin: 4px 0 2px; }
 .modal-price { font-size: 18px; font-weight: 900; margin-bottom: 12px; }

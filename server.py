@@ -343,7 +343,7 @@ def thumb_html(p):
     im = (p.get("img") or "").lstrip("./")
     if im and os.path.exists(os.path.join(IMAGES_DIR, os.path.basename(im))):
         return '<img src="%s" alt="%s" loading="lazy">' % (
-            esc("/" + im), esc(p.get("name", "")))
+            esc(im), esc(p.get("name", "")))
     return '<div class="ph">◼</div>'
 
 
