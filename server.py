@@ -180,11 +180,15 @@ def _fallback_identity():
     return "Auto Publisher", "auto@example.com"
 
 
-def git_commit_push(message):
-    """自动 add / commit / (push)。返回 (ok, 说明)。"""
+def git_commit_push(message, manual=False):
+    """自动 add / commit / (push)。返回 (ok, 说明)。
+
+    manual=True 表示「立即发布」按钮触发的强制发布: 不受 enabled 开关限制,
+    始终 commit + push。
+    """
     g = load_git()
-    if not g.get("enabled"):
-        return False, "git 自动提交已关闭 (enabled=false)"
+    if not g.get("enabled") and not manual:
+        return False, "git 自动发布未开启 (设置→Git 自动发布)"
 
     # 1) add
     if GIT_SUBPATH:
@@ -215,8 +219,8 @@ def git_commit_push(message):
         return False, "git commit 失败: " + out
     commit_hash = out.strip().splitlines()[-1] if out.strip() else ""
 
-    # 4) push (可选)
-    if g.get("push", True):
+    # 4) push (可选); 手动发布强制 push
+    if g.get("push", True) or manual:
         branch = g.get("branch", "main")
         # 若配置了 remote_url 且尚未与 origin 关联, 先 set-url
         remote_url = g.get("remote_url", "")
@@ -236,7 +240,7 @@ _last_push = {"running": False, "ts": 0, "ok": None, "msg": ""}
 _push_lock = threading.Lock()
 
 
-def start_async_push(message):
+def start_async_push(message, manual=False):
     """在后台线程执行 git_commit_push, 立即返回状态."""
     global _last_push
     with _push_lock:
@@ -245,7 +249,7 @@ def start_async_push(message):
         _last_push = {"running": True, "ts": int(time.time()), "ok": None, "msg": "发布中…"}
     def _run():
         try:
-            ok, msg = git_commit_push(message)
+            ok, msg = git_commit_push(message, manual=manual)
         except Exception as e:
             ok, msg = False, "发布出错: " + str(e)
         with _push_lock:
@@ -259,11 +263,13 @@ def start_async_push(message):
 def start_save_publish(message):
     """保存商品/设置后触发发布。自动发布关闭时直接返回未发布, 不误报已自动发布。
 
-    与「立即发布」按钮(start_async_push)区分: 手动发布不受 enabled 开关影响。
+    与「立即发布」按钮(start_async_push, manual=True)区分: 手动发布不受开关限制。
     """
     g = load_git()
     if not g.get("enabled"):
         return False, "git 自动发布未开启 (设置→Git 自动发布)"
+    if not g.get("push", True):
+        return True, "已开始自动提交(未勾选自动 push, 仅本地 commit, 不推送)"
     return start_async_push(message)
 
 
@@ -594,8 +600,11 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- Git 发布 & Setup ----
     def _handle_git_push(self):
-        """触发后台异步发布, 立即返回, 不阻塞浏览器(避免超时/断连)。"""
-        ok, msg = start_async_push("manual publish")
+        """触发后台异步发布, 立即返回, 不阻塞浏览器(避免超时/断连)。
+
+        手动「立即发布」始终强制 commit + push, 不受自动发布开关影响。
+        """
+        ok, msg = start_async_push("manual publish", manual=True)
         self._json(200 if ok else 400, {"ok": ok, "msg": msg})
 
     def _handle_git_auth(self):
@@ -1223,8 +1232,7 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
         <label style="flex:1"><span class="muted" style="font-size:11px" data-i18n="spPrefix">提交前缀</span><input type="text" id="s_git_prefix" value="chore(shop): "></label>
       </div>
       <div class="form-row" style="align-items:center;margin-top:8px">
-        <label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="s_git_enabled" checked> <span data-i18n="cbAutoCommit">保存后自动提交</span></label>
-        <label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="s_git_push" checked> <span data-i18n="cbAutoPush">自动 push</span></label>
+        <label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="s_git_enabled" checked> <span data-i18n="cbAutoPublish">保存后自动发布（自动 commit + push）</span></label>
         <button type="button" class="btn" onclick="publishNow()" style="margin-left:auto" data-i18n="btnPublishNow">立即发布</button>
       </div>
       <p class="muted" id="gitStatusHint" style="margin-top:8px">— 远程仓库未配置 —</p>
@@ -1487,7 +1495,6 @@ function openSettings() {
   document.getElementById('s_git_branch').value = g.branch || 'main';
   document.getElementById('s_git_prefix').value = g.commit_prefix || 'chore(shop): ';
   document.getElementById('s_git_enabled').checked = (g.enabled !== false);
-  document.getElementById('s_git_push').checked = (g.push !== false);
   document.getElementById('settingsOverlay').classList.remove('hidden');
   loadGitStatus();
 }
@@ -1575,7 +1582,7 @@ async function saveSettings(ev) {
       branch: document.getElementById('s_git_branch').value.trim() || 'main',
       commit_prefix: document.getElementById('s_git_prefix').value.trim(),
       enabled: document.getElementById('s_git_enabled').checked,
-      push: document.getElementById('s_git_push').checked,
+      push: document.getElementById('s_git_enabled').checked,
     }
   };
   setStatus(I18N[LANG].saving, true);
@@ -1616,7 +1623,7 @@ const I18N = {
     lblTheme:'默认配色主题', optAuto:'跟随系统 (auto)', optLight:'浅色', optDark:'深色',
     legendLight:'浅色模式配色', legendDark:'深色模式配色', spBg:'背景', spText:'文字', spSub:'次要文字',
     legendGit:'Git 自动发布', lblGitRemote:'远程仓库地址 (GitHub)', spBranch:'分支', spPrefix:'提交前缀',
-    cbAutoCommit:'保存后自动提交', cbAutoPush:'自动 push', btnPublishNow:'立即发布', btnSaveSettings:'保存设置',
+    cbAutoPublish:'保存后自动发布（自动 commit + push）', btnPublishNow:'立即发布', btnSaveSettings:'保存设置',
     rowEdit:'编辑', rowDel:'删', btnAdd:'＋ 新增商品', openLink:'打开',
     ready:'就绪', statusSaved:'已保存 {n} 件商品 · ', gitPublished:'自动发布中', notPushed:'未提交:', saving:'保存设置…',
     err:'出错：', addProductTitle:'新增商品'
@@ -1636,7 +1643,7 @@ const I18N = {
     lblTheme:'Default theme', optAuto:'Follow system (auto)', optLight:'Light', optDark:'Dark',
     legendLight:'Light palette', legendDark:'Dark palette', spBg:'Background', spText:'Text', spSub:'Muted text',
     legendGit:'Git auto-publish', lblGitRemote:'Remote repository (GitHub)', spBranch:'Branch', spPrefix:'Commit prefix',
-    cbAutoCommit:'Auto commit on save', cbAutoPush:'Auto push', btnPublishNow:'Publish now', btnSaveSettings:'Save settings',
+    cbAutoPublish:'Auto publish on save (commit + push)', btnPublishNow:'Publish now', btnSaveSettings:'Save settings',
     rowEdit:'Edit', rowDel:'Del', btnAdd:'＋ Add Item', openLink:'Open',
     ready:'Ready', statusSaved:'Saved {n} items · ', gitPublished:'auto-publishing', notPushed:'not pushed:', saving:'Saving…',
     err:'Error: ', addProductTitle:'Add Item'
