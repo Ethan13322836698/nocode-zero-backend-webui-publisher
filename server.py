@@ -56,6 +56,8 @@ SITE = {
     "hero_note": "JUMPS DIRECTLY TO FACEBOOK MARKETPLACE",
     # 购买按钮全局默认文案; 单个商品可单独覆盖
     "buy_default": "BUY NOW · GO TO FACEBOOK MARKETPLACE →",
+    # 货币符号(价格前缀): 全局默认, 单个商品可单独覆盖; 价格输入数字后自动加此符号
+    "currency": "$",
     # 配色 (CSS 变量)
     "colors": {
         "light": {"ink": "#000000", "paper": "#ffffff", "gray": "#666666", "light": "#efefef", "line": "#c8c8c8"},
@@ -423,11 +425,25 @@ def _asset_escape(s):
     return json.dumps(s, ensure_ascii=False)
 
 
+def price_display(p, cur="$"):
+    """价格展示: 纯数字价格自动在前面加货币符号(商品 sym 覆盖全局 currency),
+    非纯数字(旧数据/特殊文案)原样显示; 空价格不显示。"""
+    raw = (p.get("price") or "").strip()
+    if not raw:
+        return ""
+    if re.fullmatch(r"[0-9.,]+", raw):
+        sym = (p.get("sym") or "").strip() or cur
+        return sym + raw
+    return raw
+
+
 def render_index(products):
+    _cur = load_site().get("currency") or "$"
     cards = []
     for i, p in enumerate(products):
         n = len(product_imgs(p))
         badge = '<span class="thumb-count">%d</span>' % n if n > 1 else ""
+        price_html = esc(price_display(p, _cur))
         cards.append(
             """            <button class="card" type="button" aria-label="View %s details" data-idx="%d">
               <div class="card-thumb">%s%s</div>
@@ -441,7 +457,7 @@ def render_index(products):
                 thumb_html(p),
                 badge,
                 esc(p.get("name", "")),
-                esc(p.get("price", "")),
+                price_html,
                 esc(p.get("cat", "")),
             )
         )
@@ -467,9 +483,20 @@ def render_index(products):
     tag_html = ('<p class="tagline">%s</p>' % esc(s.get("tagline"))) if s.get("tagline") else ""
     foot_html = ("<p>%s</p>" % esc(s.get("footer_main"))) if s.get("footer_main") else ""
     foot_sub_html = ('<p class="footer-sub">%s</p>' % esc(s.get("footer_sub"))) if s.get("footer_sub") else ""
-    hero_title_html = esc(s.get("hero_title") or "Things I Sell")
+    # 首页 hero: 标题/副标题/小徽标全部可留空, 全空则整块不显示
+    hero_title_html = esc(s.get("hero_title") or "")
     hero_sub_html = esc(s.get("hero_sub") or "")
     hero_note_html = esc(s.get("hero_note") or "")
+    if hero_title_html or hero_sub_html or hero_note_html:
+        hero_html = ('    <section class="hero">\n'
+                     '      <h1>%s</h1>\n'
+                     '      <p class="hero-sub">%s</p>\n'
+                     '      <p class="hero-note">%s</p>\n'
+                     '    </section>') % (hero_title_html, hero_sub_html, hero_note_html)
+    else:
+        hero_html = ""
+    # 全局货币符号: 价格输入数字后自动加在数字前面, 商品可单独覆盖
+    currency = _cur
 
     c = s.get("colors", {})
     light, dark = c.get("light", {}), c.get("dark", {})
@@ -498,12 +525,11 @@ def render_index(products):
     index = index.replace("/*__TAGLINE__*/", tag_html)
     index = index.replace("/*__FOOTER_MAIN__*/", foot_html)
     index = index.replace("/*__FOOTER_SUB__*/", foot_sub_html)
-    index = index.replace("/*__HERO_TITLE__*/", hero_title_html)
-    index = index.replace("/*__HERO_SUB__*/", hero_sub_html)
-    index = index.replace("/*__HERO_NOTE__*/", hero_note_html)
+    index = index.replace("/*__HERO__*/", hero_html)
     index = index.replace("/*__COLOR_CSS__*/", css)
     index = index.replace("/*__THEME_JS__*/", theme_js)
     index = index.replace("/*__BUY_DEFAULT__*/", esc_js(s.get("buy_default") or "BUY NOW · GO TO FACEBOOK MARKETPLACE →"))
+    index = index.replace("/*__CURRENCY__*/", esc_js(currency))
     index = index.replace("/*__CARDS__*/", cards_html)
     index = index.replace("/*__EMPTY__*/", empty_html)
     index = index.replace("/*__PRODUCTS_JSON__*/", products_json)
@@ -946,11 +972,7 @@ INDEX_TEMPLATE = '''<!DOCTYPE html>
 </header>
 
 <main class="container">
-  <section class="hero">
-    <h1>/*__HERO_TITLE__*/</h1>
-    <p class="hero-sub">/*__HERO_SUB__*/</p>
-    <p class="hero-note">/*__HERO_NOTE__*/</p>
-  </section>
+  /*__HERO__*/
 
   <section id="grid" class="grid">
 /*__CARDS__*/
@@ -983,6 +1005,7 @@ INDEX_TEMPLATE = '''<!DOCTYPE html>
 <script>
 const PRODUCTS = /*__PRODUCTS_JSON__*/;
 const BUY_DEFAULT = "/*__BUY_DEFAULT__*/";
+const CURRENCY = "/*__CURRENCY__*/";
 // 卡片已由服务端渲染；JS 只负责弹窗。
 (function () {
   const grid = document.getElementById('grid');
@@ -1027,7 +1050,11 @@ const BUY_DEFAULT = "/*__BUY_DEFAULT__*/";
     gCur = 0;
     renderGallery();
     mTitle.textContent = p.name || '';
-    mPrice.textContent = p.price || '';
+    mPrice.textContent = (function (pr) {
+      pr = (pr || '').trim();
+      if (!pr) return '';
+      return /^[0-9.,]+$/.test(pr) ? ((p.sym || CURRENCY || '$') + pr) : pr;
+    })(p.price);
     mDesc.textContent = p.desc || 'No description yet.';
     mBuy.href = p.buy || 'https://www.facebook.com/marketplace/';
     mBuy.textContent = p.buy_text || BUY_DEFAULT;
@@ -1167,8 +1194,10 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
     <input type="hidden" id="f_idx">
     <label data-i18n="lblName">名称</label>
     <input type="text" id="f_name" required>
-    <label data-i18n="lblPrice">价格 <span class="muted">(例：¥ 299)</span></label>
-    <input type="text" id="f_price">
+    <label data-i18n="lblPrice">价格（直接输入数字，自动加符号）</label>
+    <input type="text" id="f_price" inputmode="decimal" placeholder="$" oninput="onPriceInput()">
+    <label data-i18n="lblSym">货币符号（留空用全局默认）</label>
+    <input type="text" id="f_sym" placeholder="$ / ¥ / NT$ …" oninput="onSymInput()" style="max-width:140px">
     <label data-i18n="lblCat">分类</label>
     <input type="text" id="f_cat">
     <label data-i18n="lblDesc">简介</label>
@@ -1214,6 +1243,8 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
     <input type="text" id="s_hero_note">
     <label data-i18n="lblBuyDefault">购买按钮全局默认文案（没单独设的商品用这个）</label>
     <input type="text" id="s_buy_default" placeholder="如: BUY NOW · GO TO FB MARKETPLACE">
+    <label data-i18n="lblCurrency">货币符号（价格前缀，默认 $）</label>
+    <input type="text" id="s_currency" placeholder="$" style="max-width:140px">
     <label data-i18n="lblFooterMain">页脚主文案（留空则不显示）</label>
     <input type="text" id="s_footer_main">
     <label data-i18n="lblFooterSub">页脚副文案（留空则不显示）</label>
@@ -1286,7 +1317,7 @@ function renderRows() {
     return '<tr>' +
     '<td><div class="rowimg-cell">' + cell + '</div></td>' +
     '<td><b>' + p.name + '</b></td>' +
-    '<td>' + p.price + '</td>' +
+    '<td>' + dispPrice(p) + '</td>' +
     '<td>' + p.cat + '</td>' +
     '<td class="small">' + (p.desc ? p.desc.substring(0, 30) : '') + '</td>' +
     '<td><a class="small" href="' + p.buy + '" target="_blank">' + (I18N[LANG].openLink || '打开') + '</a></td>' +
@@ -1305,6 +1336,35 @@ function setStatus(msg, ok) {
   status.className = ok ? 'ok' : 'err';
 }
 
+/* 价格输入: 输入数字后自动在前面加货币符号(商品 sym 优先, 否则全局默认) */
+var _prRaw = '';                       // 输入框中当前的纯数字价格
+function priceSym() {
+  return document.getElementById('f_sym').value.trim() || (SITE_DEFAULT.currency || '$');
+}
+function syncPriceBox() {
+  const el = document.getElementById('f_price');
+  el.value = priceSym() + _prRaw;
+}
+function onPriceInput() {
+  const el = document.getElementById('f_price');
+  const sym = priceSym();
+  let v = el.value;
+  if (sym && v.indexOf(sym) === 0) v = v.slice(sym.length);
+  v = v.replace(/[^0-9.,]/g, '');
+  _prRaw = v;
+  el.value = sym + v;
+}
+function onSymInput() {
+  const el = document.getElementById('f_sym');
+  if (_prRaw !== '') syncPriceBox();
+  else if (!el.value.trim()) document.getElementById('f_price').value = SITE_DEFAULT.currency || '$';
+}
+function dispPrice(p) {
+  const pr = (p.price || '').trim();
+  if (!pr) return '';
+  return /^[0-9.,]+$/.test(pr) ? ((p.sym || '').trim() || SITE_DEFAULT.currency || '$' || '') + pr : pr;
+}
+
 /* 表单 */
 function addProduct() {
   resetForm();
@@ -1315,7 +1375,10 @@ function edit(i) {
   const p = PRODUCTS[i];
   document.getElementById('f_idx').value = i;
   document.getElementById('f_name').value = p.name || '';
-  document.getElementById('f_price').value = p.price || '';
+  document.getElementById('f_sym').value = p.sym || '';
+  const pr = (p.price || '').trim();
+  _prRaw = /^[0-9.,]+$/.test(pr) ? pr : '';
+  document.getElementById('f_price').value = /^[0-9.,]+$/.test(pr) ? (priceSym() + pr) : pr;
   document.getElementById('f_cat').value = p.cat || '';
   document.getElementById('f_desc').value = p.desc || '';
   document.getElementById('f_buy').value = p.buy || '';
@@ -1329,6 +1392,8 @@ function edit(i) {
 function resetForm() {
   document.getElementById('f_idx').value = '';
   document.getElementById('f_name').value = '';
+  _prRaw = '';
+  document.getElementById('f_sym').value = '';
   document.getElementById('f_price').value = '';
   document.getElementById('f_cat').value = '';
   document.getElementById('f_desc').value = '';
@@ -1459,7 +1524,9 @@ async function save(ev) {
     : Object.assign({}, PRODUCTS[parseInt(idx, 10)]);
 
   item.name = document.getElementById('f_name').value.trim();
-  item.price = document.getElementById('f_price').value.trim();
+  const boxPrice = document.getElementById('f_price').value.trim();
+  item.price = (_prRaw !== '' || boxPrice === '') ? _prRaw : boxPrice;
+  item.sym = document.getElementById('f_sym').value.trim();
   item.cat = document.getElementById('f_cat').value.trim();
   item.desc = document.getElementById('f_desc').value.trim();
   item.buy = document.getElementById('f_buy').value.trim() || 'https://www.facebook.com/marketplace/';
@@ -1550,6 +1617,7 @@ function openSettings() {
   document.getElementById('s_hero_sub').value = s.hero_sub || '';
   document.getElementById('s_hero_note').value = s.hero_note || '';
   document.getElementById('s_buy_default').value = s.buy_default || '';
+  document.getElementById('s_currency').value = s.currency || '$';
   document.getElementById('s_footer_main').value = s.footer_main || '';
   document.getElementById('s_footer_sub').value = s.footer_sub || '';
   document.getElementById('s_dark_default').value = s.dark_default || 'auto';
@@ -1635,6 +1703,7 @@ async function saveSettings(ev) {
     hero_sub: document.getElementById('s_hero_sub').value.trim(),
     hero_note: document.getElementById('s_hero_note').value.trim(),
     buy_default: document.getElementById('s_buy_default').value.trim(),
+    currency: document.getElementById('s_currency').value.trim() || '$',
     dark_default: document.getElementById('s_dark_default').value,
     colors: {
       light: {
@@ -1683,7 +1752,7 @@ const I18N = {
     title:'商品管理后台', preview:'预览首页 →', settings:'⚙ 网站设置', addItem:'＋ 新增商品',
     tip:'改动后自动重写 index.html。图片上传到 images/ 文件夹。',
     thImg:'图片', thName:'名称', thPrice:'价格', thCat:'分类', thDesc:'简介', thLink:'购买链接', thOp:'操作',
-    editItem:'编辑商品', lblName:'名称', lblPrice:'价格 (例：¥ 299)', lblCat:'分类', lblDesc:'简介',
+    editItem:'编辑商品', lblName:'名称', lblPrice:'价格（直接输入数字，自动加符号）', lblSym:'货币符号（留空用全局默认）', lblCat:'分类', lblDesc:'简介',
     lblBuyLink:'购买链接 (Facebook Marketplace 页)', lblBuyText:'购买按钮文案（留空用全局默认）', lblImg:'商品图片',
     lblImgHint:'可上传多张，第一张为列表封面。点 “＋ 添加图片” 继续选择。', lblCover:'封面',
     addImgBtn:'＋ 添加图片', btnLinkImg:'＋ 外链图片', uploading:'上传图片…',
@@ -1691,7 +1760,7 @@ const I18N = {
     btnCancel:'取消', btnSave:'保存',
     settingsTitle:'网站设置', lblSiteTitle:'站点标题（浏览器标签）', lblLogo:'Logo 文字',
     lblTagline:'顶部副标题 Tagline（留空则不显示）', lblHeroTitle:'首页大标题', lblHeroSub:'首页副标题说明', lblHeroNote:'首页小徽标',
-    lblBuyDefault:'购买按钮全局默认文案', lblFooterMain:'页脚主文案（留空则不显示）', lblFooterSub:'页脚副文案（留空则不显示）',
+    lblBuyDefault:'购买按钮全局默认文案', lblCurrency:'货币符号（价格前缀，默认 $）', lblFooterMain:'页脚主文案（留空则不显示）', lblFooterSub:'页脚副文案（留空则不显示）',
     lblTheme:'默认配色主题', optAuto:'跟随系统 (auto)', optLight:'浅色', optDark:'深色',
     legendLight:'浅色模式配色', legendDark:'深色模式配色', spBg:'背景', spText:'文字', spSub:'次要文字',
     legendGit:'Git 自动发布', lblGitRemote:'远程仓库地址 (GitHub)', spBranch:'分支', spPrefix:'提交前缀',
@@ -1704,7 +1773,7 @@ const I18N = {
     title:'Item Admin', preview:'Preview →', settings:'⚙ Settings', addItem:'＋ Add Item',
     tip:'Every change rewrites index.html. Uploaded images go into images/.',
     thImg:'Image', thName:'Name', thPrice:'Price', thCat:'Category', thDesc:'Description', thLink:'Buy Link', thOp:'Actions',
-    editItem:'Edit Item', lblName:'Name', lblPrice:'Price (e.g. ¥ 299)', lblCat:'Category', lblDesc:'Description',
+    editItem:'Edit Item', lblName:'Name', lblPrice:'Price (type numbers, symbol added automatically)', lblSym:'Currency symbol (blank = global default)', lblCat:'Category', lblDesc:'Description',
     lblBuyLink:'Buy Link (Facebook Marketplace)', lblBuyText:'Buy button text (blank = global default)', lblImg:'Images',
     lblImgHint:'You can add multiple images. The first one is the cover. Click “＋ Add image” to add more.', lblCover:'Cover',
     addImgBtn:'＋ Add image', btnLinkImg:'＋ Image URL', uploading:'Uploading…',
@@ -1712,7 +1781,7 @@ const I18N = {
     btnCancel:'Cancel', btnSave:'Save',
     settingsTitle:'Settings', lblSiteTitle:'Site title (browser tab)', lblLogo:'Logo text',
     lblTagline:'Tagline (blank = hidden)', lblHeroTitle:'Homepage headline', lblHeroSub:'Homepage subtitle', lblHeroNote:'Homepage badge',
-    lblBuyDefault:'Default buy-button text', lblFooterMain:'Footer main text (blank = hidden)', lblFooterSub:'Footer sub text (blank = hidden)',
+    lblBuyDefault:'Default buy-button text', lblCurrency:'Currency symbol (price prefix, default $)', lblFooterMain:'Footer main text (blank = hidden)', lblFooterSub:'Footer sub text (blank = hidden)',
     lblTheme:'Default theme', optAuto:'Follow system (auto)', optLight:'Light', optDark:'Dark',
     legendLight:'Light palette', legendDark:'Dark palette', spBg:'Background', spText:'Text', spSub:'Muted text',
     legendGit:'Git auto-publish', lblGitRemote:'Remote repository (GitHub)', spBranch:'Branch', spPrefix:'Commit prefix',
