@@ -3,6 +3,9 @@ site.json
 setup.json
 .git-credentials
 
+# FB Cookie 加密密钥(机器本地, 绝不提交; 丢了只能重填 Cookie)
+fb.cookie.key
+
 # Python 缓存
 __pycache__/
 *.pyc

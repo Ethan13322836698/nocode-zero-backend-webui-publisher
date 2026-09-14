@@ -22,13 +22,17 @@ Python3 标准库实现, 无任何第三方依赖。
 import os
 import re
 import json
+import hmac
 import time
 import html
 import threading
+import hashlib
 import base64
 import mimetypes
 import subprocess
 import urllib.parse
+import urllib.request
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +40,8 @@ DATA_FILE = os.path.join(HERE, "products.json")
 SITE_FILE = os.path.join(HERE, "site.json")
 IMAGES_DIR = os.path.join(HERE, "images")
 INDEX_FILE = os.path.join(HERE, "index.html")
+FB_KEY_FILE = os.path.join(HERE, "fb.cookie.key")
+FB_ENC_PREFIX = "FB-ENC:v1:"
 
 PORT = int(os.environ.get("BWMARKET_PORT", "8000"))
 EMOJI_FALLBACK = "◼"
@@ -151,6 +157,147 @@ def load_site():
 def save_site(site):
     with open(SITE_FILE, "w", encoding="utf-8") as f:
         json.dump(site, f, ensure_ascii=False, indent=2)
+
+
+def _fb_key():
+    """读取/生成本机 FB Cookie 加密密钥: 随机 32 字节, 0600 权限, git-ignored 不上传。"""
+    try:
+        with open(FB_KEY_FILE, "rb") as f:
+            return f.read()
+    except OSError:
+        pass
+    key = os.urandom(32)
+    fd = None
+    try:
+        fd = os.open(FB_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(key)
+        fd = None
+    except OSError:
+        pass
+    finally:
+        if fd is not None:
+            os.close(fd)
+    try:
+        with open(FB_KEY_FILE, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _xor_stream(key, iv, size):
+    """CTR 式流密钥: keystream = SHA256(key || iv || ctr) 逐块拼接。"""
+    out = b""
+    ctr = 0
+    while len(out) < size:
+        h = hashlib.new("sha256")
+        h.update(key)
+        h.update(iv)
+        h.update(str(ctr).encode("ascii"))
+        out += h.digest()
+        ctr += 1
+    return out[:size]
+
+
+def _fb_encrypt(plain):
+    """加密 FB Cookie: FB-ENC:v1: + urlsafe_base64(iv + hmactag + ciphertext)。"""
+    key = _fb_key()
+    if not key:
+        return None
+    data = plain.encode("utf-8")
+    iv = os.urandom(16)
+    stream = _xor_stream(key, iv, len(data))
+    cipher = bytes(a ^ b for a, b in zip(data, stream))
+    tag = hmac.new(key, iv + cipher, hashlib.sha256).digest()
+    return FB_ENC_PREFIX + base64.urlsafe_b64encode(iv + tag + cipher).decode("ascii")
+
+
+def _fb_decrypt(value):
+    """解密 FB Cookie: 密钥缺失/格式非法/HMAC 校验失败一律返回 None(不抛异常)。"""
+    key = _fb_key()
+    if not key or not value:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    if not value.startswith(FB_ENC_PREFIX):
+        return None
+    try:
+        blob = base64.urlsafe_b64decode(value[len(FB_ENC_PREFIX):])
+    except Exception:
+        return None
+    if len(blob) < 16 + 32 + 1:
+        return None
+    iv, tag, cipher = blob[:16], blob[16:48], blob[48:]
+    expect = hmac.new(key, iv + cipher, hashlib.sha256).digest()
+    if not hmac.compare_digest(expect, tag):
+        return None
+    stream = _xor_stream(key, iv, len(cipher))
+    raw = bytes(a ^ b for a, b in zip(cipher, stream)).decode("utf-8", "replace")
+    return raw
+
+
+def site_public():
+    """下发给浏览器的站点配置: 抹掉明文/密文 Cookie, 改给一个“是否已设置”的布尔值。"""
+    site = dict(load_site())
+    site.pop("fb_cookie", None)
+    site["fb_cookie_set"] = bool(fb_cookie().strip())
+    return site
+
+
+def _normalize_cookie(raw):
+    """把粘贴的 FB Cookie 归一化成单行 'name=value; name=value' 请求头格式。
+
+    兼容常见三种贴法:
+      1) 浏览器请求头里的整行 Cookie (name=value; name=value; ...)
+      2) DevTools 折行显示的长 Cookie 头 (每行一段, 自动用 ; 拼回)
+      3) DevTools Application 面板的 Cookie 表格 (每行 tab 分隔: 名字\t值\t域名\t路径\t...)
+    无法识别或无需转换时原样返回。"""
+    raw = (raw or "").strip()
+    if not raw:
+        return raw
+    while len(raw) >= 2 and raw[0] in "\"'" and raw[-1] == raw[0]:
+        raw = raw[1:-1].strip()  # 去掉用户误粘的成对引号
+    rows = [r.strip() for r in raw.splitlines() if r.strip()]
+    # Application 表格格式: 有行含制表符 → 按「名字=值」取前两列拼成 Cookie 头
+    if any("\t" in r for r in rows):
+        _skip = {"name", "value", "domain", "path", "expires", "size",
+                 "httponly", "secure", "samesite", "priority", "partitionkey"}
+        parts = []
+        for r in rows:
+            cols = r.split("\t")
+            if len(cols) < 2:
+                continue
+            name = cols[0].strip()
+            val = cols[1].strip()
+            if (name and val and name.lower() not in _skip
+                    and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", name)):
+                parts.append(name + "=" + val)
+        if parts:
+            return "; ".join(parts)
+    # 请求头格式: 逐行去除残尾分号后, 用 ; 拼回(兼续航行折行的情况)
+    return "; ".join(rrst for rrst in (r.rstrip(";").strip() for r in rows) if rrst)
+
+
+def fb_cookie():
+    """返回可用的 FB 登录 Cookie(解密后明文, 仅内存中短暂存在)。
+
+    以 FB-ENC:v1: 开头视为密文自动解密; 若是历史明文则就地加密回写 site.json
+    (兼容迁移)。密钥在本地 fb.cookie.key, 不提交, 不落明文。"""
+    raw = load_site().get("fb_cookie") or ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    raw = raw.strip()
+    if not raw:
+        return ""
+    if raw.startswith(FB_ENC_PREFIX):
+        return _normalize_cookie(_fb_decrypt(raw) or "")
+    # 历史明文 → 迁移为密文
+    enc = _fb_encrypt(raw)
+    if enc and enc != raw:
+        site = load_site()
+        site["fb_cookie"] = enc
+        save_site(site)
+    return _normalize_cookie(raw)
 
 
 # ------------------------- 自动 Git 发布 -------------------------
@@ -419,6 +566,390 @@ def verify_images(products):
     return products
 
 
+# ------------------------- Marketplace 链接提取 -------------------------
+# 从 Facebook Marketplace 商品页提取 名称/价格/简介/图片链接(只提链接, 不下载图片)。
+_CUR_SYM_MAP = {
+    "US$": "$", "A$": "A$", "CA$": "CA$", "HK$": "HK$", "NT$": "NT$", "S$": "S$",
+    "USD": "$", "CAD": "CA$", "AUD": "A$", "SGD": "S$", "HKD": "HK$", "NZD": "NZ$",
+    "TWD": "NT$", "EUR": "€", "GBP": "£", "JPY": "¥", "CNY": "¥", "MYR": "RM",
+    "THB": "฿", "INR": "₹", "KRW": "₩", "VND": "₫", "PHP": "₱", "PKR": "₨",
+    "BDT": "৳", "LKR": "රු", "CHF": "CHF", "SEK": "kr", "NOK": "kr", "DKK": "kr",
+    "PLN": "zł", "CZK": "Kč", "ZAR": "R", "IDR": "Rp", "MXN": "MX$", "BRL": "R$",
+    "RUB": "₽", "TRY": "₺",
+}
+_PRICE_PAT = re.compile(
+    r"(" + "|".join(re.escape(k) for k in _CUR_SYM_MAP) + r"|[$€£¥฿₹₩₫])"
+    r"\s*([0-9][0-9,\.]*)",
+    re.I,
+)
+
+
+# 浏览器 UA 列表: FB 反爬会拒绝现代版浏览器头, 短/老版本反而放行, 依次尝试
+_UA_LIST = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.112 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Mozilla/5.0",
+    "curl/8.0",
+)
+
+
+def _http_get(url, timeout=20, cookie=None):
+    """用浏览器 UA 抓取网页(自动跟随重定向)。成功返回 (html, final_url, "")；
+    失败返回 (None, None, 失败原因)。cookie 传入时优先用它, 否则用设置里保存的。"""
+    errors = []
+    saved_cookie = fb_cookie()
+    for ua in _UA_LIST:
+        try:
+            headers = {
+                "User-Agent": ua,
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            ck = saved_cookie if cookie is None else cookie
+            if ck:
+                headers["Cookie"] = ck
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                ctype = resp.headers.get("Content-Type", "")
+                enc = "utf-8"
+                m = re.search(r"charset=([\w-]+)", ctype, re.I)
+                if m:
+                    enc = m.group(1)
+                data = resp.read()
+                try:
+                    return data.decode(enc, "replace"), resp.geturl(), ""
+                except (LookupError, UnicodeDecodeError):
+                    return data.decode("utf-8", "replace"), resp.geturl(), ""
+        except urllib.error.HTTPError as e:
+            errors.append("HTTP %s" % (e.code or 0))
+        except Exception as e:
+            errors.append("%s: %s" % (type(e).__name__, str(e)[:80]))
+    return None, None, "; ".join(errors) or "network error"
+
+
+def _meta_tags(html_txt):
+    """抽取页面所有 <meta property/name = content> 成 dict。"""
+    out = {}
+    for m in re.finditer(r"<meta[^>]*>", html_txt or "", re.I):
+        tag = m.group(0)
+        p = re.search(r'(?:property|name)\s*=\s*["\']([^"\']+)["\']', tag, re.I)
+        c = re.search(r'content\s*=\s*["\']([^"\']*)["\']', tag, re.I | re.S)
+        if p and c:
+            key = p.group(1).strip().lower()
+            if key and key not in out:
+                out[key] = html.unescape(c.group(1))
+    return out
+
+
+def _find_price(text):
+    """从文本里找第一处价格, 返回 (数字串, 货币符号) 或 (None, None)。"""
+    m = _PRICE_PAT.search(text or "")
+    if not m:
+        return None, None
+    tok = m.group(1)
+    sym = _CUR_SYM_MAP.get(tok) or _CUR_SYM_MAP.get(tok.upper()) or tok
+    num = re.sub(r"\.00$", "", m.group(2).replace(",", ""))
+    return num, sym
+
+
+def _sans_prices(text):
+    """剥掉文本里的价格片段。"""
+    return _PRICE_PAT.sub(" ", text or "")
+
+
+def _clean_name(text):
+    """把 og:title / <title> 清洗成商品名称。
+
+    FB 页面标题常见两种带前缀形式: "Marketplace - 商品名" 或
+    "Facebook Marketplace - 商品名", 这里一并剥掉。"""
+    t = (text or "").strip()
+    # 后缀: "商品名 | Facebook" 之类
+    t = re.sub(r"\s*[-|·–]\s*(Facebook|Marketplace).*$", "", t, flags=re.I)
+    # 前缀: "Marketplace - 商品名" / "Facebook Marketplace - 商品名" / "Facebook - 商品名"
+    t = re.sub(r"^\s*(?:Facebook\s+)?Marketplace\s*[-|·–:]\s*", "", t, flags=re.I)
+    t = re.sub(r"^\s*(?:Marketplace|Facebook)\s*[-|·–:]\s*", "", t, flags=re.I)
+    t = _sans_prices(t)
+    t = re.sub(r"^\s*[-|·–:\s]+", "", t)
+    t = re.sub(r"[-|·–\s]+$", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _clean_desc(text):
+    """清洗简介: 去掉登录墙/失效提示/面包屑噪音(如 "Marketplace - 标题 > > > ...")。"""
+    t = html.unescape(text or "").strip()
+    if not t:
+        return ""
+    low = t.lower()
+    if "log in to facebook" in low or "login" in low or "登录" in t:
+        return ""
+    if "this content isn't available" in low or "isn’t available" in low:
+        return ""
+    if "page not found" in low:
+        return ""
+    # 面包屑/标题重复: "Marketplace - xx"、"xx > > > > xx" 之类纯噪音
+    if re.match(r"marketplace\s*[-|·:]", low):
+        return ""
+    if "> >" in low or re.search(r">\s*>\s*>", low) or low.count(">") > 4:
+        return ""
+    return t[:2000]
+
+
+def _jsonld(html_txt):
+    """解析页面里的 application/ld+json 块, 返回 dict 列表。"""
+    out = []
+    for m in re.finditer(
+            r"<script[^>]*application/ld\+json[^>]*>(.*?)</script>",
+            html_txt or "", re.I | re.S):
+        try:
+            data = json.loads(m.group(1).strip())
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            out.append(data)
+        elif isinstance(data, list):
+            out.extend(x for x in data if isinstance(x, dict))
+    return out
+
+
+def _unescape_json_url(u):
+    """还原 JSON 里的 \\/ 和 \\uXXXX 转义。"""
+    return re.sub(r"\\u([0-9a-fA-F]{4})",
+                  lambda m: chr(int(m.group(1), 16)), u.replace("\\/", "/"))
+
+
+def _extract_img_urls(html_txt):
+    """提取页面里的 FB CDN 图片 URL, 保留完整签名查询串(?stp=...&oh=...&oe=...,
+    截断会变成打不开的 403 死链)。同一张照片的不同尺寸变体按照片ID去重。"""
+    txt = re.sub(r"\\u([0-9a-fA-F]{4})",
+                 lambda m: chr(int(m.group(1), 16)), html_txt or "")
+    txt = txt.replace("\\/", "/")
+    txt = html.unescape(txt)  # 还原 &amp; 实体, 得到真实带 & 的查询参数
+    urls = []
+    seen_ids = set()
+    for u in re.findall(r"https://scontent[^\"'<> )]+\.(?:jpg|jpeg|png|webp)[^\"'<> )]*", txt, re.I):
+        u = u.strip()
+        if "/v/" not in u or "\\" in u:
+            continue
+        if re.search(r"/cp[0-9]+", u):  # 头像角标缩略图, 跳过
+            continue
+        if len(urls) >= 40:
+            break
+        mid = re.search(r"/(\d+)_\d+_[a-z0-9_]*\.(?:jpg|jpeg|png|webp)", u, re.I)
+        key = mid.group(1) if mid else u
+        if key in seen_ids:
+            continue
+        seen_ids.add(key)
+        urls.append(u)
+    return urls
+
+
+def _decent_desc(t, skip_text=""):
+    """简介候选是否靠谱: 拒绝面包屑「>」串/标题重复/纯符号行。"""
+    low = (t or "").lower().strip()
+    if not low:
+        return False
+    if "> >" in low or re.search(r">\s*>\s*>", low) or low.count(">") > 4:
+        return False
+    sym = sum(1 for ch in low if not ch.isalnum() and ch not in " \t,.'\u2019\"!?-()/@#%&+*=\u3001\u3002\uff0c\u300a\u300b")
+    if sym and sym > len(low) * 0.35:
+        return False
+    skip = (skip_text or "").lower().strip()
+    if skip and (low == skip or low.startswith(skip[:24])):
+        return False
+    if re.match(r"marketplace\s*[-|·:]", low):
+        return False
+    return True
+
+
+def _first_text(html_txt, skip_text=""):
+    """兜底抓简介: 挑页面第一段「像样」的文字(跳过面包屑/标题重复)。"""
+    for m in re.finditer(r"<p[^>]*>(.*?)</p>", html_txt or "", re.I | re.S):
+        t = re.sub(r"<[^>]+>", " ", m.group(1))
+        t = html.unescape(re.sub(r"\s+", " ", t)).strip()
+        if len(t) >= 8 and _decent_desc(t, skip_text):
+            return _clean_desc(t)
+    t = re.sub(r"<script.*?</script>??", " ", html_txt or "", flags=re.I | re.S)
+    t = re.sub(r"<style.*?</style>??", " ", t, flags=re.I | re.S)
+    t = re.sub(r"<[^>]+>", " ", t)
+    t = html.unescape(re.sub(r"\s+", " ", t)).strip()
+    return _clean_desc(t)[:500]
+
+
+# FB 价格常见的内嵌 JSON key(用于提取 + 诊断), 按可能命中率大致排序
+_PRICE_KEY_NAMES = (
+    "formatted_price", "amountWithFormat", "amountWithCurrencyFormat",
+    "amountWithCurrency", "marketplace_listing_price_amount",
+    "listing_price_amount", "sale_price_amount", "price_amount",
+    "marketplacePrice",
+)
+
+
+def _json_price(html_txt):
+    """从页面内嵌 JSON 里找价格(登录态下 FB 常把价格放在这些 key 里)。"""
+    pats = (
+        r'"formatted_price"\s*:\s*"([^"]+)"',
+        r'"amountWithFormat"\s*:\s*"([^"]+)"',
+        r'"amountWithCurrencyFormat"\s*:\s*"([^"]+)"',
+        r'"amountWithCurrency"\s*:\s*"([^"]+)"',
+        r'"marketplace_listing_price_amount"\s*:\s*"?([0-9][0-9,.]*)"?',
+        r'"listing_price_amount"\s*:\s*([0-9][0-9,.]*)',
+        r'"sale_price_amount"\s*:\s*([0-9][0-9,.]*)',
+        r'"price_amount"\s*:\s*([0-9][0-9,.]*)',
+        r'"marketplacePrice"\s*:\s*([0-9][0-9,.]*)',
+    )
+    for p in pats:
+        m = re.search(p, html_txt or "")
+        if not m:
+            continue
+        v = m.group(1)
+        num, sym = _find_price(v)
+        if num:
+            return num, sym
+        v2 = re.sub(r"[^0-9.,]", "", v)
+        if re.fullmatch(r"[0-9][0-9,.]*", v2):
+            return v2, ""
+    return None, None
+
+
+def _diag_info(html_txt, meta, imgs):
+    """返回抓取诊断数据, 用于定位“价格/图片没提取到”的根因。"""
+    page = html_txt or ""
+    return {
+        "price_keys": [k for k in _PRICE_KEY_NAMES if k in page],
+        "minPrice_null": '"minPrice":null' in page,
+        "has_og_image": bool(meta.get("og:image")),
+        "spa_shell": bool(meta.get("og:title") or meta.get("og:image")) is False
+                     and ("fb_dtsg" in page or '"LSD"' in page),
+        "scontent": page.count("scontent"),
+        "imgs_extracted": len(imgs),
+    }
+
+
+def _parse_item_page(html_txt, final):
+    """解析单个页面: 成功返回 {name,price,sym,desc,imgs}; 撞登录墙返回 None。"""
+    meta = _meta_tags(html_txt)
+    tm = re.search(r"<title[^>]*>(.*?)</title>", html_txt or "", re.I | re.S)
+    title = html.unescape(re.sub(r"\s+", " ", tm.group(1))).strip() if tm else ""
+    title = meta.get("og:title") or title
+    if not title:
+        return None
+    low_title = title.lower()
+    if re.search(r"log\s*in|login|登录", low_title):
+        return None
+    if final and "/login" in urllib.parse.urlparse(final).path:
+        return None
+
+    name = _clean_name(title)
+    price, sym = _find_price(title)
+    desc = _clean_desc(meta.get("og:description") or meta.get("description"))
+    imgs = _extract_img_urls(html_txt)
+    if not imgs and meta.get("og:image"):
+        imgs.append(meta["og:image"])
+
+    for jd in _jsonld(html_txt):
+        jtype = str(jd.get("@type") or "")
+        if not name and jd.get("name"):
+            name = str(jd["name"])[:200]
+        if not price and jd.get("offers"):
+            off = jd["offers"]
+            if isinstance(off, dict):
+                off = [off]
+            if isinstance(off, list) and off and isinstance(off[0], dict) and off[0].get("price") is not None:
+                price = str(off[0]["price"])
+                sym = ""
+        if not desc and jd.get("description"):
+            desc = _clean_desc(str(jd["description"]))
+        imgv = jd.get("image")
+        if imgv:
+            if isinstance(imgv, str) and imgv.startswith("http"):
+                imgs.append(_unescape_json_url(imgv))
+            elif isinstance(imgv, list):
+                for iv in imgv:
+                    u = iv.get("url") if isinstance(iv, dict) else iv
+                    if isinstance(u, str) and u.startswith("http"):
+                        imgs.append(_unescape_json_url(u))
+
+    if not price:
+        jp_num, jp_sym = _json_price(html_txt)
+        if jp_num:
+            price, sym = jp_num, jp_sym
+
+    if not desc:
+        desc = _first_text(html_txt, skip_text=name)
+    seen, imgs2 = set(), []
+    for u in imgs:
+        if u and u not in seen:
+            seen.add(u)
+            imgs2.append(u)
+    return {"name": name, "price": price, "sym": sym, "desc": desc,
+            "imgs": imgs2[:30], "diag": _diag_info(html_txt, meta, imgs2)}
+
+
+def scrape_marketplace(url, cookie=None):
+    """从 Facebook Marketplace 商品链接提取 名称/价格/简介/图片 URL。只提取链接, 不下载。
+
+    策略: FB 桌面商品页登录后是纯 JS 壳(SRP 不含价格/图片数据), 反而是
+    匿名 SEO 版的名字/简介/封面图最干净——所以一律先匿名抓一份做基础,
+    再在有 Cookie 时补抓一次登录态(万一登录态能拿到更多图/价),
+    最后按「照片ID去重 + 字段择优」合并。"""
+    m = re.search(r"marketplace/item/(\d+)", url or "")
+    if not m:
+        return {"ok": False, "error": "不是有效的 Facebook Marketplace 商品链接，请使用形如 …/marketplace/item/123456789/ 的地址"}
+    item_id = m.group(1)
+    buy = "https://www.facebook.com/marketplace/item/%s/" % item_id
+    result = {"ok": True, "name": "", "price": "", "sym": "", "desc": "", "imgs": [], "buy": buy}
+
+    got_login = False
+    last_err = ""
+    www = "https://www.facebook.com/marketplace/item/%s/" % item_id
+    # 匿名(必须显式传 "" 才能真正不带 Cookie → FB 才会给 SEO 干净页)
+    seq = [(www, "")]
+    saved_ck = cookie or fb_cookie() or None
+    if saved_ck:
+        seq.append((www, saved_ck))
+    seq.append(("https://mbasic.facebook.com/marketplace/item/%s/" % item_id, ""))
+
+    parses = []
+    for turl, ck in seq:
+        html_txt, final, err = _http_get(turl, cookie=ck)
+        if not html_txt:
+            last_err = err or last_err
+            continue
+        parsed = _parse_item_page(html_txt, final)
+        if parsed is None:
+            got_login = True
+            continue
+        parses.append(parsed)
+        if not result.get("diag"):
+            result["diag"] = parsed.get("diag") or {}
+
+    if not parses:
+        if last_err:
+            return {"ok": False, "error": "无法访问链接（网络或代理异常）：" + last_err}
+        if got_login:
+            return {"ok": False, "error": "Facebook 要求登录，此商品无法自动提取。请手动填写，或换用可公开访问的链接。"}
+        return {"ok": False, "error": "未能从链接提取到商品信息，链接可能已失效或页面结构已变更。"}
+
+    # 图片: 按「照片ID」去重合并(同名不同尺寸只保留一张)
+    seen_ids = set()
+    for p in parses:
+        for u in (p.get("imgs") or []):
+            mid = re.search(r"/(\d+)_\d+_", u)
+            key = mid.group(1) if mid else u
+            if key not in seen_ids:
+                seen_ids.add(key)
+                result["imgs"].append(u)
+    result["imgs"] = result["imgs"][:30]
+
+    # 其余字段按首个非空(匿名 SEO 在前, 名字/简介已清洗, 无 "Marketplace - " 前缀)
+    for k in ("name", "price", "sym", "desc"):
+        for p in parses:
+            if not result.get(k) and p.get(k):
+                result[k] = p[k]
+                break
+    return result
+
+
 # ------------------------- 静态页渲染 -------------------------
 @staticmethod
 def _asset_escape(s):
@@ -589,7 +1120,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/products":
             self._json(200, load_products())
         elif path == "/api/settings":
-            self._json(200, load_site())
+            self._json(200, site_public())
         elif path == "/api/git/status":
             st = git_status()
             st["push"] = push_status()
@@ -637,6 +1168,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_setup_complete()
         elif path == "/api/upload":
             self._handle_upload()
+        elif path == "/api/scrape/marketplace":
+            self._handle_scrape_marketplace()
         else:
             self._send(404, "<h1>404</h1>")
 
@@ -740,6 +1273,16 @@ class Handler(BaseHTTPRequestHandler):
             incoming = json.loads(body)
             if not isinstance(incoming, dict):
                 raise ValueError("body must be an object")
+            # fb_cookie: 入站明文一律加密存储; 空串显式清空; 缺省不动(保已有)
+            raw_cookie = incoming.get("fb_cookie")
+            if isinstance(raw_cookie, str):
+                rc = _normalize_cookie(raw_cookie)
+                if rc and not rc.startswith(FB_ENC_PREFIX):
+                    incoming["fb_cookie"] = _fb_encrypt(rc) or rc
+                elif not rc:
+                    incoming["fb_cookie"] = ""
+            elif raw_cookie is not None:
+                raise ValueError("fb_cookie must be a string")
             merged = _deep_merge(SITE, incoming)
             # 若本次保存未带 git 字段, 保留已有 git 配置, 防止远程配置被清空
             if "git" not in incoming:
@@ -808,10 +1351,31 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json(400, {"ok": False, "error": str(e)})
 
+    def _handle_scrape_marketplace(self):
+        """从 Marketplace 商品链接自动提取 名称/价格/简介/图片链接(不下载)。"""
+        try:
+            body = json.loads(self._read_body().decode("utf-8") or "{}")
+            url = (body.get("url") or "").strip()
+            if not url:
+                self._json(400, {"ok": False, "error": "缺少链接地址"})
+                return
+            # cookie: 设置了才用(测试框里的 cookie 优先级高于已保存的); 空串等价于未设置。
+            # 先做格式归一化: 兼容请求头整行 / 折行 / Application 表格三种贴法
+            cookie = _normalize_cookie((body.get("cookie") or "").strip()) or None
+            # 必须先配置 Cookie 才能导入(价格/详情只有登录态才稳定): 既没带也没保存就拒绝
+            if not cookie and not fb_cookie().strip():
+                self._json(400, {"ok": False, "error":
+                    "未配置 FB 登录 Cookie。请先在「网站设置 → Marketplace 价格提取」里保存 Cookie 再导入。"})
+                return
+            data = scrape_marketplace(url, cookie=cookie)
+            self._json(200 if data.get("ok") else 400, data)
+        except Exception as e:
+            self._json(400, {"ok": False, "error": str(e)})
+
     def admin_page(self):
         products = load_products()
         page = ADMIN_TEMPLATE.replace("/*__PRODUCTS_JSON__*/", json.dumps(products, ensure_ascii=False))
-        page = page.replace("/*__SITE_JSON__*/", json.dumps(load_site(), ensure_ascii=False))
+        page = page.replace("/*__SITE_JSON__*/", json.dumps(site_public(), ensure_ascii=False))
         return page
 
 
@@ -1100,7 +1664,7 @@ ADMIN_TEMPLATE = '''<!DOCTYPE html>
 <link rel="stylesheet" href="style.css">
 <style>
 /* —— 管理页专用版式 —— */
-body.admin-body { padding: 20px; max-width: 1200px; margin: 0 auto; overflow-x: hidden; }
+body.admin-body { padding: 20px; width: auto; overflow-x: hidden; }
 .toolbar {
   display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
   padding: 16px 0; border-bottom: 1px solid var(--ink); box-sizing: border-box;
@@ -1119,6 +1683,8 @@ body.admin-body { padding: 20px; max-width: 1200px; margin: 0 auto; overflow-x: 
 .muted { color: var(--gray); font-size: 12px; }
 .table-wrap { overflow-x: auto; width: 100%; }
 .table-wrap table { min-width: 760px; }
+.row-ops { display: flex; gap: 6px; white-space: nowrap; align-items: center; }
+.row-ops .btn { padding: 6px 9px; }
 table { width: 100%; border-collapse: collapse; margin-top: 20px; }
 th, td { border: 1px solid var(--ink); padding: 10px; text-align: left; font-size: 14px; vertical-align: middle; }
 th { background: var(--ink); color: var(--paper); letter-spacing: 1px; }
@@ -1204,6 +1770,10 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
     <textarea id="f_desc"></textarea>
     <label data-i18n="lblBuyLink">购买链接 (Facebook Marketplace 页)</label>
     <input type="url" id="f_buy" placeholder="https://www.facebook.com/marketplace/...">
+    <div class="form-row" style="margin-top:6px">
+      <button type="button" class="btn" onclick="scrapeLink()" data-i18n="btnScrape">◆ 从 Marketplace 链接导入</button>
+      <span class="muted" style="align-self:center" data-i18n="lblScrapeHint">自动提取 名称/价格/简介/图片链接（不下载）</span>
+    </div>
     <label data-i18n="lblBuyText">购买按钮文案（留空用全局默认）</label>
     <input type="text" id="f_buy_text" placeholder="留空则用网站设置的全局默认">
     <label data-i18n="lblImg">商品图片</label>
@@ -1281,11 +1851,32 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
         <label style="flex:1"><span class="muted" style="font-size:11px" data-i18n="spBranch">分支</span><input type="text" id="s_git_branch" value="main"></label>
         <label style="flex:1"><span class="muted" style="font-size:11px" data-i18n="spPrefix">提交前缀</span><input type="text" id="s_git_prefix" value="chore(shop): "></label>
       </div>
+      <div class="form-row" style="margin-top:10px">
+        <label style="flex:1"><span class="muted" style="font-size:11px" data-i18n="lblGitUser">GitHub 用户名</span><input type="text" id="s_git_user" autocomplete="username" placeholder="your-github-name"></label>
+        <label style="flex:1"><span class="muted" style="font-size:11px" data-i18n="lblGitToken">GitHub Token (PAT)</span><input type="password" id="s_git_token" autocomplete="current-password" placeholder="ghp_xxx / github_pat_xxx" title="Personal Access Token"></label>
+      </div>
+      <div class="form-row" style="align-items:center;margin-top:6px">
+        <button type="button" class="btn" onclick="saveGitAuth()" data-i18n="btnSaveGitAuth">保存 GitHub 凭据</button>
+        <span class="muted" id="gitCredHint">‐</span>
+      </div>
       <div class="form-row" style="align-items:center;margin-top:8px">
         <label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="s_git_enabled" checked> <span data-i18n="cbAutoPublish">保存后自动发布（自动 commit + push）</span></label>
         <button type="button" class="btn" onclick="publishNow()" style="margin-left:auto" data-i18n="btnPublishNow">立即发布</button>
       </div>
       <p class="muted" id="gitStatusHint" style="margin-top:8px">— 远程仓库未配置 —</p>
+    </fieldset>
+    <fieldset>
+      <legend class="muted" data-i18n="legendMarket">Marketplace 价格提取（可选）</legend>
+      <p class="muted" data-i18n="mktHint">填入已登录 Facebook 的 Cookie 后，才能自动提取到价格。获取方法：浏览器登录 FB → F12 → 网络(Network) → 点开任意 www.facebook.com 请求 → 复制「请求标头」里整行 Cookie 粘贴到这里。保存后加密存储到本地 site.json + 密钥文件 fb.cookie.key（均不会提交到 GitHub），不在页面上回显。支持两种贴法：请求头整行 Cookie，或 Application 面板表格，会自动识别转换。</p>
+      <textarea id="s_fb_cookie" placeholder="c_user=xxx; xs=xxx; …（或直接粘贴 Application 表格）" style="min-height:70px"></textarea>
+      <div class="form-row" style="align-items:center;margin-top:6px">
+        <label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="s_fb_cookie_clear"> <span data-i18n="cbFbClear">移除已保存的 Cookie（不再用于提取价格）</span></label>
+      </div>
+      <p class="muted" id="fbCookiehint" style="margin-top:6px">—</p>
+      <div class="form-row" style="margin-top:8px">
+        <button type="button" class="btn" onclick="testScrape()" data-i18n="btnTestScrape">试提取一条商品</button>
+        <span class="muted" id="testScrapeHint" style="align-self:center">‐</span>
+      </div>
     </fieldset>
     <div class="form-actions">
       <button type="button" class="btn" onclick="hideSettings()" data-i18n="btnCancel">取消</button>
@@ -1322,10 +1913,12 @@ function renderRows() {
     '<td class="small">' + (p.desc ? p.desc.substring(0, 30) : '') + '</td>' +
     '<td><a class="small" href="' + p.buy + '" target="_blank">' + (I18N[LANG].openLink || '打开') + '</a></td>' +
     '<td>' +
-      '<button class="btn" onclick="edit(' + i + ')">' + I18N[LANG].rowEdit + '</button> ' +
-      '<button class="btn" onclick="move(' + i + ',-1)">↑</button> ' +
-      '<button class="btn" onclick="move(' + i + ',1)">↓</button> ' +
+      '<div class="row-ops">' +
+      '<button class="btn" onclick="edit(' + i + ')">' + I18N[LANG].rowEdit + '</button>' +
+      '<button class="btn" onclick="move(' + i + ',-1)" title="↑">↑</button>' +
+      '<button class="btn" onclick="move(' + i + ',1)" title="↓">↓</button>' +
       '<button class="btn btn-danger" onclick="del(' + i + ')">' + I18N[LANG].rowDel + '</button>' +
+      '</div>' +
     '</td>' +
     '</tr>';
   }).join('');
@@ -1515,6 +2108,57 @@ function addLinkImg() {
   renderImgList();
 }
 
+/* 从 Marketplace 链接导入: 自动提取 名称/价格/简介/图片链接(不下载) */
+async function scrapeLink() {
+  const L = I18N[LANG] || I18N.zh;
+  // 必须先配置登录 Cookie 才能导入
+  if (!SITE_DEFAULT.fb_cookie_set) {
+    alert(L.needCookie);
+    return;
+  }
+  let u = (document.getElementById('f_buy').value || '').trim();
+  // 购买链接框里的默认地址(非商品页)忽略, 弹窗让用户输入商品链接
+  if (!/marketplace\\/item\\/\\d+/.test(u)) u = '';
+  if (!u) {
+    const p = prompt(L.promptScrapeUrl);
+    if (!p) return;
+    u = p.trim();
+  }
+  if (u.indexOf('http://') !== 0 && u.indexOf('https://') !== 0) {
+    alert(L.errBadUrl);
+    return;
+  }
+  setStatus(L.scraping, true);
+  try {
+    const resp = await fetch('/api/scrape/marketplace', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: u })
+    });
+    const j = await resp.json();
+    if (!j.ok) throw new Error(j.error || L.scrapeFail);
+    if (j.name) document.getElementById('f_name').value = j.name;
+    if (j.price !== undefined && j.price !== '') {
+      _prRaw = String(j.price);
+      const sym = j.sym || '';
+      document.getElementById('f_sym').value = (sym && sym === (SITE_DEFAULT.currency || '$')) ? '' : sym;
+      syncPriceBox();
+    }
+    if (j.desc) document.getElementById('f_desc').value = j.desc;
+    if (j.buy) document.getElementById('f_buy').value = j.buy;
+    if (Array.isArray(j.imgs) && j.imgs.length) {
+      formImgs = j.imgs.slice();
+      pendingImgs = [];
+      renderImgList();
+    }
+    const n = (j.imgs && j.imgs.length) || 0;
+    setStatus(L.scraped + (n ? L.foundImgs.replace('{n}', n) : ''), true);
+  } catch (e) {
+    setStatus((L.err || '出错：') + e.message, false);
+    alert(e.message);
+  }
+}
+
 /* 保存：先上传图（若有），再保存商品列表 */
 async function save(ev) {
   ev.preventDefault();
@@ -1634,6 +2278,10 @@ function openSettings() {
   document.getElementById('s_git_branch').value = g.branch || 'main';
   document.getElementById('s_git_prefix').value = g.commit_prefix || 'chore(shop): ';
   document.getElementById('s_git_enabled').checked = (g.enabled !== false);
+  document.getElementById('s_fb_cookie').value = '';
+  document.getElementById('s_fb_cookie_clear').checked = false;
+  const fbh = document.getElementById('fbCookiehint');
+  fbh.textContent = s.fb_cookie_set ? (I18N[LANG].fbCookieSet || '已保存') : (I18N[LANG].fbCookieNotSet || '未保存');
   document.getElementById('settingsOverlay').classList.remove('hidden');
   loadGitStatus();
 }
@@ -1647,7 +2295,12 @@ async function loadGitStatus() {
     const j = await r.json();
     const el = document.getElementById('gitStatusHint');
     if (j && j.is_repo) {
-      el.textContent = '本地仓库: ✓  远程: ' + (j.remote_url || '未设置') + '  分支: ' + j.branch;
+      el.textContent = '本地仓库: ✓  远程: ' + (j.remote_url || '未设置') + '  分支: ' + j.branch + '  自动发布: ' + (j.auto_enabled ? '开' : '关');
+      // 用真实仓库状态补齐设置框里 site.json 缺失/为空的值
+      const g = (SITE_DEFAULT.git || {});
+      if (!g.remote_url && j.remote_url) document.getElementById('s_git_remote').value = j.remote_url;
+      if (!g.branch && j.branch) document.getElementById('s_git_branch').value = j.branch;
+      if (g.enabled === undefined) document.getElementById('s_git_enabled').checked = !!j.auto_enabled;
     } else {
       el.textContent = '未初始化 Git 仓库，请在 setup 或设置里配置远程地址。';
     }
@@ -1689,6 +2342,36 @@ async function publishNow() {
   })();
 }
 
+/* 保存 GitHub 用户名 + Token: 存入系统凭据管理器(不经 site.json/明文), 下次推送自动使用 */
+async function saveGitAuth() {
+  const L = I18N[LANG] || I18N.zh;
+  const hint = document.getElementById('gitCredHint');
+  const user = document.getElementById('s_git_user').value.trim();
+  const token = document.getElementById('s_git_token').value.trim();
+  if (!user || !token) { hint.textContent = L.gitCredNeedBoth; return; }
+  let remote_url = document.getElementById('s_git_remote').value.trim();
+  if (!remote_url) {
+    try {
+      const r = await fetch('/api/git/status');
+      const j = await r.json();
+      remote_url = j.remote_url || '';
+    } catch (e) {}
+  }
+  hint.textContent = L.gitCredSaving;
+  try {
+    const r = await fetch('/api/git/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ remote_url: remote_url, user: user, pass: token })
+    });
+    const j = await r.json();
+    hint.textContent = j.ok ? (L.gitCredOk + (j.msg || '')) : (L.gitCredFail + (j.error || j.msg || ''));
+    if (j.ok) document.getElementById('s_git_token').value = '';
+  } catch (e) {
+    hint.textContent = L.gitCredFail + e.message;
+  }
+}
+
 async function saveSettings(ev) {
   ev.preventDefault();
   const payload = {
@@ -1725,6 +2408,10 @@ async function saveSettings(ev) {
       push: document.getElementById('s_git_enabled').checked,
     }
   };
+  // Cookie: 只在“新填了内容”或“勾选移除”时携带, 不清空则不提交该字段(保留已保存的)
+  const _fbVal = document.getElementById('s_fb_cookie').value.trim();
+  if (document.getElementById('s_fb_cookie_clear').checked) payload.fb_cookie = '';
+  else if (_fbVal) payload.fb_cookie = _fbVal;
   setStatus(I18N[LANG].saving, true);
   try {
     const resp = await fetch('/api/settings', {
@@ -1743,6 +2430,46 @@ async function saveSettings(ev) {
     hideSettings();
   } catch (e) {
     setStatus((I18N[LANG].err||'出错：') + e.message, false);
+  }
+}
+
+/* 试提取: 用设置框里填的 Cookie 立即测试能否提取到价格 */
+async function testScrape() {
+  const L = I18N[LANG] || I18N.zh;
+  const hint = document.getElementById('testScrapeHint');
+  const ck = document.getElementById('s_fb_cookie').value.trim();
+  let u = (PRODUCTS[0] && PRODUCTS[0].buy) || '';
+  if (!/marketplace\\/item\\/\\d+/.test(u)) {
+    const p = prompt(L.promptScrapeUrl);
+    if (!p) return;
+    u = p.trim();
+  }
+  hint.textContent = L.scraping;
+  try {
+    const body = { url: u };
+    if (ck) body.cookie = ck;
+    const resp = await fetch('/api/scrape/marketplace', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const j = await resp.json();
+    if (!j.ok) throw new Error(j.error || L.scrapeFail);
+    const n = (j.imgs && j.imgs.length) || 0;
+    const priced = (j.price !== undefined && j.price !== '');
+    let note = '';
+    if (!priced) {
+      const d = j.diag || {};
+      const pk = (d.price_keys && d.price_keys.length) ? d.price_keys.join(',') : '无';
+      note = '（未提取到价格 | 诊断: 价键[' + pk + '] minPrice:' + (d.minPrice_null ? 'null' : '?') +
+             ' scontent:' + d.scontent + ' og图:' + (d.has_og_image ? '✓' : '×') +
+             (d.spa_shell ? '| FB只给JS壳' : '') + '）';
+    }
+    hint.textContent = '名称: ' + (j.name || '—') +
+      '  价格: ' + (priced ? (j.sym || '') + j.price : '—') +
+      '  图片: ' + n + ' 张' + note;
+  } catch (e) {
+    hint.textContent = (L.err || '出错：') + e.message;
   }
 }
 
@@ -1765,7 +2492,16 @@ const I18N = {
     legendLight:'浅色模式配色', legendDark:'深色模式配色', spBg:'背景', spText:'文字', spSub:'次要文字',
     legendGit:'Git 自动发布', lblGitRemote:'远程仓库地址 (GitHub)', spBranch:'分支', spPrefix:'提交前缀',
     cbAutoPublish:'保存后自动发布（自动 commit + push）', btnPublishNow:'立即发布', btnSaveSettings:'保存设置',
+    lblGitUser:'GitHub 用户名', lblGitToken:'GitHub Token (PAT)', btnSaveGitAuth:'保存 GitHub 凭据',
+    gitCredNeedBoth:'请填写 GitHub 用户名和 Token（登录后推送用，不回显）', gitCredSaving:'正在保存凭据…',
+    gitCredOk:'凭据已保存·', gitCredFail:'凭据保存失败: ',
+    legendMarket:'Marketplace 价格提取（可选）', mktHint:'填入已登录 Facebook 的 Cookie 后，才能自动提取到价格。获取方法：浏览器登录 FB → F12 → 网络(Network) → 点开任意 www.facebook.com 请求 → 复制「请求标头」里整行 Cookie 粘贴到这里。保存后加密存储（本地 site.json + 密钥文件 fb.cookie.key，均不提交 GitHub，不在页面回显）。支持两种贴法：请求头整行 Cookie，或 Application 面板表格，自动识别转换。',
+    btnTestScrape:'试提取一条商品', cbFbClear:'移除已保存的 Cookie（不再用于提取价格）',
+    fbCookieSet:'已保存登录 Cookie（加密存储，不会在页面回显）', fbCookieNotSet:'未保存 Cookie —— 提取价格可能失败。',
     rowEdit:'编辑', rowDel:'删', btnAdd:'＋ 新增商品', openLink:'打开',
+    btnScrape:'◆ 从 Marketplace 链接导入', lblScrapeHint:'自动提取 名称/价格/简介/图片链接（不下载）',
+    promptScrapeUrl:'粘贴 Facebook Marketplace 商品链接（自动提取图片链接/价格/简介）：',
+    scraping:'正在从链接提取信息…', scraped:'已从链接导入，请核对后保存。', foundImgs:'已提取 {n} 张图片（外链，未下载）。', scrapeFail:'提取失败，请检查链接或稍后再试。', needCookie:'请先在「网站设置 → Marketplace 价格提取」里保存已登录 Facebook 的 Cookie，之后才能从 Marketplace 链接导入。',
     ready:'就绪', statusSaved:'已保存 {n} 件商品 · ', gitPublished:'自动发布中', notPushed:'未提交:', saving:'保存设置…',
     err:'出错：', addProductTitle:'新增商品'
   },
@@ -1786,7 +2522,16 @@ const I18N = {
     legendLight:'Light palette', legendDark:'Dark palette', spBg:'Background', spText:'Text', spSub:'Muted text',
     legendGit:'Git auto-publish', lblGitRemote:'Remote repository (GitHub)', spBranch:'Branch', spPrefix:'Commit prefix',
     cbAutoPublish:'Auto publish on save (commit + push)', btnPublishNow:'Publish now', btnSaveSettings:'Save settings',
+    lblGitUser:'GitHub username', lblGitToken:'GitHub Token (PAT)', btnSaveGitAuth:'Save GitHub credentials',
+    gitCredNeedBoth:'Fill in both the GitHub username and a Token (used for push, never echoed)', gitCredSaving:'Saving credentials…',
+    gitCredOk:'Credentials saved ·', gitCredFail:'Failed to save credentials: ',
+    legendMarket:'Marketplace price extraction (optional)', mktHint:'Paste your logged-in Facebook Cookie so prices can be fetched. How to get it: log into Facebook in your browser → F12 → Network tab → click any www.facebook.com request → copy the entire "Cookie" line from Request Headers → paste here. Stored encrypted in local site.json + key file fb.cookie.key (never committed to GitHub, never shown back on this page). Both paste styles work: the full Cookie header line, or the Application panel table — auto-recognized and converted.',
+    btnTestScrape:'Test-extract an item', cbFbClear:'Clear saved cookie (stop using it for prices)',
+    fbCookieSet:'Login cookie saved (encrypted — not shown on this page)', fbCookieNotSet:'No cookie saved — price extraction may fail.',
     rowEdit:'Edit', rowDel:'Del', btnAdd:'＋ Add Item', openLink:'Open',
+    btnScrape:'◆ Import from Marketplace link', lblScrapeHint:'Auto-fills name/price/description/image links (kept as links, not downloaded)',
+    promptScrapeUrl:'Paste a Facebook Marketplace item link (extracts image links/price/description):',
+    scraping:'Extracting info from link…', scraped:'Imported from link — please verify before saving.', foundImgs:'Extracted {n} images (external links, not downloaded).', scrapeFail:'Extraction failed. Check the link or try again.', needCookie:'Please save your logged-in Facebook Cookie under "Settings → Marketplace price extraction" first — Marketplace links can only be imported with a cookie.',
     ready:'Ready', statusSaved:'Saved {n} items · ', gitPublished:'auto-publishing', notPushed:'not pushed:', saving:'Saving…',
     err:'Error: ', addProductTitle:'Add Item'
   }
