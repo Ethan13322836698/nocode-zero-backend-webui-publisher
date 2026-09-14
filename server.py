@@ -1359,14 +1359,8 @@ class Handler(BaseHTTPRequestHandler):
             if not url:
                 self._json(400, {"ok": False, "error": "缺少链接地址"})
                 return
-            # cookie: 设置了才用(测试框里的 cookie 优先级高于已保存的); 空串等价于未设置。
-            # 先做格式归一化: 兼容请求头整行 / 折行 / Application 表格三种贴法
+            # cookie: 设置了才用; 空串等价于未设置。未登录时也会尽力提取名称/简介/封面图。
             cookie = _normalize_cookie((body.get("cookie") or "").strip()) or None
-            # 必须先配置 Cookie 才能导入(价格/详情只有登录态才稳定): 既没带也没保存就拒绝
-            if not cookie and not fb_cookie().strip():
-                self._json(400, {"ok": False, "error":
-                    "未配置 FB 登录 Cookie。请先在「网站设置 → Marketplace 价格提取」里保存 Cookie 再导入。"})
-                return
             data = scrape_marketplace(url, cookie=cookie)
             self._json(200 if data.get("ok") else 400, data)
         except Exception as e:
@@ -1732,9 +1726,11 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
 <div class="toolbar">
   <div class="toolbar-title">
     <h1 data-i18n="title">商品管理后台</h1>
+    <span class="muted" id="totalCount" style="font-weight:700"></span>
     <span id="status" class="muted">就绪</span>
   </div>
   <div class="toolbar-actions">
+    <input type="search" id="searchBox" data-i18n-ph="searchPlaceholder" placeholder="搜索商品…" oninput="renderRows()" style="min-width:220px;padding:7px 10px;border:1px solid #ccc;border-radius:6px">
     <button class="btn" id="langToggle" onclick="toggleLang()" title="语言 / Language">EN</button>
     <a class="btn" href="/" target="_blank" data-i18n="preview">预览首页 →</a>
     <button class="btn" onclick="openSettings()" data-i18n="settings">⚙ 网站设置</button>
@@ -1865,19 +1861,6 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
       </div>
       <p class="muted" id="gitStatusHint" style="margin-top:8px">— 远程仓库未配置 —</p>
     </fieldset>
-    <fieldset>
-      <legend class="muted" data-i18n="legendMarket">Marketplace 价格提取（可选）</legend>
-      <p class="muted" data-i18n="mktHint">填入已登录 Facebook 的 Cookie 后，才能自动提取到价格。获取方法：浏览器登录 FB → F12 → 网络(Network) → 点开任意 www.facebook.com 请求 → 复制「请求标头」里整行 Cookie 粘贴到这里。保存后加密存储到本地 site.json + 密钥文件 fb.cookie.key（均不会提交到 GitHub），不在页面上回显。支持两种贴法：请求头整行 Cookie，或 Application 面板表格，会自动识别转换。</p>
-      <textarea id="s_fb_cookie" placeholder="c_user=xxx; xs=xxx; …（或直接粘贴 Application 表格）" style="min-height:70px"></textarea>
-      <div class="form-row" style="align-items:center;margin-top:6px">
-        <label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="s_fb_cookie_clear"> <span data-i18n="cbFbClear">移除已保存的 Cookie（不再用于提取价格）</span></label>
-      </div>
-      <p class="muted" id="fbCookiehint" style="margin-top:6px">—</p>
-      <div class="form-row" style="margin-top:8px">
-        <button type="button" class="btn" onclick="testScrape()" data-i18n="btnTestScrape">试提取一条商品</button>
-        <span class="muted" id="testScrapeHint" style="align-self:center">‐</span>
-      </div>
-    </fieldset>
     <div class="form-actions">
       <button type="button" class="btn" onclick="hideSettings()" data-i18n="btnCancel">取消</button>
       <button type="submit" class="btn" data-i18n="btnSaveSettings">保存设置</button>
@@ -1899,8 +1882,20 @@ function imgsOf(p) {
   const imgs = Array.isArray(p && p.imgs) ? p.imgs : (p && p.img ? [p.img] : []);
   return imgs.filter(Boolean);
 }
+function matches(p, q) {
+  return (p.name || '').toLowerCase().indexOf(q) >= 0 ||
+         (p.cat || '').toLowerCase().indexOf(q) >= 0 ||
+         (p.desc || '').toLowerCase().indexOf(q) >= 0 ||
+         (p.buy || '').toLowerCase().indexOf(q) >= 0;
+}
+
 function renderRows() {
-  rows.innerHTML = PRODUCTS.map((p, i) => {
+  const q = document.getElementById('searchBox').value.trim().toLowerCase();
+  const L = I18N[LANG] || I18N.zh;
+  const idx = PRODUCTS.map((p, i) => ({ p, i })).filter(x => !q || matches(x.p, q));
+  document.getElementById('totalCount').textContent = L.countItems.replace('{n}', PRODUCTS.length) +
+    (q && PRODUCTS.length ? L.matchItems.replace('{n}', idx.length) : '');
+  rows.innerHTML = idx.map(({ p, i }) => {
     const imgs = imgsOf(p);
     const cell = imgs.length
       ? '<img class="rowimg" src="' + imgs[0] + '" alt="">' + (imgs.length > 1 ? '<span class="rowimg-count">' + imgs.length + '</span>' : '')
@@ -2111,11 +2106,6 @@ function addLinkImg() {
 /* 从 Marketplace 链接导入: 自动提取 名称/价格/简介/图片链接(不下载) */
 async function scrapeLink() {
   const L = I18N[LANG] || I18N.zh;
-  // 必须先配置登录 Cookie 才能导入
-  if (!SITE_DEFAULT.fb_cookie_set) {
-    alert(L.needCookie);
-    return;
-  }
   let u = (document.getElementById('f_buy').value || '').trim();
   // 购买链接框里的默认地址(非商品页)忽略, 弹窗让用户输入商品链接
   if (!/marketplace\\/item\\/\\d+/.test(u)) u = '';
@@ -2278,10 +2268,6 @@ function openSettings() {
   document.getElementById('s_git_branch').value = g.branch || 'main';
   document.getElementById('s_git_prefix').value = g.commit_prefix || 'chore(shop): ';
   document.getElementById('s_git_enabled').checked = (g.enabled !== false);
-  document.getElementById('s_fb_cookie').value = '';
-  document.getElementById('s_fb_cookie_clear').checked = false;
-  const fbh = document.getElementById('fbCookiehint');
-  fbh.textContent = s.fb_cookie_set ? (I18N[LANG].fbCookieSet || '已保存') : (I18N[LANG].fbCookieNotSet || '未保存');
   document.getElementById('settingsOverlay').classList.remove('hidden');
   loadGitStatus();
 }
@@ -2408,10 +2394,6 @@ async function saveSettings(ev) {
       push: document.getElementById('s_git_enabled').checked,
     }
   };
-  // Cookie: 只在“新填了内容”或“勾选移除”时携带, 不清空则不提交该字段(保留已保存的)
-  const _fbVal = document.getElementById('s_fb_cookie').value.trim();
-  if (document.getElementById('s_fb_cookie_clear').checked) payload.fb_cookie = '';
-  else if (_fbVal) payload.fb_cookie = _fbVal;
   setStatus(I18N[LANG].saving, true);
   try {
     const resp = await fetch('/api/settings', {
@@ -2430,46 +2412,6 @@ async function saveSettings(ev) {
     hideSettings();
   } catch (e) {
     setStatus((I18N[LANG].err||'出错：') + e.message, false);
-  }
-}
-
-/* 试提取: 用设置框里填的 Cookie 立即测试能否提取到价格 */
-async function testScrape() {
-  const L = I18N[LANG] || I18N.zh;
-  const hint = document.getElementById('testScrapeHint');
-  const ck = document.getElementById('s_fb_cookie').value.trim();
-  let u = (PRODUCTS[0] && PRODUCTS[0].buy) || '';
-  if (!/marketplace\\/item\\/\\d+/.test(u)) {
-    const p = prompt(L.promptScrapeUrl);
-    if (!p) return;
-    u = p.trim();
-  }
-  hint.textContent = L.scraping;
-  try {
-    const body = { url: u };
-    if (ck) body.cookie = ck;
-    const resp = await fetch('/api/scrape/marketplace', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    const j = await resp.json();
-    if (!j.ok) throw new Error(j.error || L.scrapeFail);
-    const n = (j.imgs && j.imgs.length) || 0;
-    const priced = (j.price !== undefined && j.price !== '');
-    let note = '';
-    if (!priced) {
-      const d = j.diag || {};
-      const pk = (d.price_keys && d.price_keys.length) ? d.price_keys.join(',') : '无';
-      note = '（未提取到价格 | 诊断: 价键[' + pk + '] minPrice:' + (d.minPrice_null ? 'null' : '?') +
-             ' scontent:' + d.scontent + ' og图:' + (d.has_og_image ? '✓' : '×') +
-             (d.spa_shell ? '| FB只给JS壳' : '') + '）';
-    }
-    hint.textContent = '名称: ' + (j.name || '—') +
-      '  价格: ' + (priced ? (j.sym || '') + j.price : '—') +
-      '  图片: ' + n + ' 张' + note;
-  } catch (e) {
-    hint.textContent = (L.err || '出错：') + e.message;
   }
 }
 
@@ -2495,13 +2437,11 @@ const I18N = {
     lblGitUser:'GitHub 用户名', lblGitToken:'GitHub Token (PAT)', btnSaveGitAuth:'保存 GitHub 凭据',
     gitCredNeedBoth:'请填写 GitHub 用户名和 Token（登录后推送用，不回显）', gitCredSaving:'正在保存凭据…',
     gitCredOk:'凭据已保存·', gitCredFail:'凭据保存失败: ',
-    legendMarket:'Marketplace 价格提取（可选）', mktHint:'填入已登录 Facebook 的 Cookie 后，才能自动提取到价格。获取方法：浏览器登录 FB → F12 → 网络(Network) → 点开任意 www.facebook.com 请求 → 复制「请求标头」里整行 Cookie 粘贴到这里。保存后加密存储（本地 site.json + 密钥文件 fb.cookie.key，均不提交 GitHub，不在页面回显）。支持两种贴法：请求头整行 Cookie，或 Application 面板表格，自动识别转换。',
-    btnTestScrape:'试提取一条商品', cbFbClear:'移除已保存的 Cookie（不再用于提取价格）',
-    fbCookieSet:'已保存登录 Cookie（加密存储，不会在页面回显）', fbCookieNotSet:'未保存 Cookie —— 提取价格可能失败。',
+    searchPlaceholder:'搜索商品（名称/分类/简介/链接）…', countItems:'共 {n} 件商品', matchItems:' · 匹配 {n} 条',
     rowEdit:'编辑', rowDel:'删', btnAdd:'＋ 新增商品', openLink:'打开',
     btnScrape:'◆ 从 Marketplace 链接导入', lblScrapeHint:'自动提取 名称/价格/简介/图片链接（不下载）',
     promptScrapeUrl:'粘贴 Facebook Marketplace 商品链接（自动提取图片链接/价格/简介）：',
-    scraping:'正在从链接提取信息…', scraped:'已从链接导入，请核对后保存。', foundImgs:'已提取 {n} 张图片（外链，未下载）。', scrapeFail:'提取失败，请检查链接或稍后再试。', needCookie:'请先在「网站设置 → Marketplace 价格提取」里保存已登录 Facebook 的 Cookie，之后才能从 Marketplace 链接导入。',
+    scraping:'正在从链接提取信息…', scraped:'已从链接导入，请核对后保存。', foundImgs:'已提取 {n} 张图片（外链，未下载）。', scrapeFail:'提取失败，请检查链接或稍后再试。',
     ready:'就绪', statusSaved:'已保存 {n} 件商品 · ', gitPublished:'自动发布中', notPushed:'未提交:', saving:'保存设置…',
     err:'出错：', addProductTitle:'新增商品'
   },
@@ -2525,13 +2465,11 @@ const I18N = {
     lblGitUser:'GitHub username', lblGitToken:'GitHub Token (PAT)', btnSaveGitAuth:'Save GitHub credentials',
     gitCredNeedBoth:'Fill in both the GitHub username and a Token (used for push, never echoed)', gitCredSaving:'Saving credentials…',
     gitCredOk:'Credentials saved ·', gitCredFail:'Failed to save credentials: ',
-    legendMarket:'Marketplace price extraction (optional)', mktHint:'Paste your logged-in Facebook Cookie so prices can be fetched. How to get it: log into Facebook in your browser → F12 → Network tab → click any www.facebook.com request → copy the entire "Cookie" line from Request Headers → paste here. Stored encrypted in local site.json + key file fb.cookie.key (never committed to GitHub, never shown back on this page). Both paste styles work: the full Cookie header line, or the Application panel table — auto-recognized and converted.',
-    btnTestScrape:'Test-extract an item', cbFbClear:'Clear saved cookie (stop using it for prices)',
-    fbCookieSet:'Login cookie saved (encrypted — not shown on this page)', fbCookieNotSet:'No cookie saved — price extraction may fail.',
+    searchPlaceholder:'Search items (name/category/desc/link)…', countItems:'{n} items', matchItems:' · {n} shown',
     rowEdit:'Edit', rowDel:'Del', btnAdd:'＋ Add Item', openLink:'Open',
     btnScrape:'◆ Import from Marketplace link', lblScrapeHint:'Auto-fills name/price/description/image links (kept as links, not downloaded)',
     promptScrapeUrl:'Paste a Facebook Marketplace item link (extracts image links/price/description):',
-    scraping:'Extracting info from link…', scraped:'Imported from link — please verify before saving.', foundImgs:'Extracted {n} images (external links, not downloaded).', scrapeFail:'Extraction failed. Check the link or try again.', needCookie:'Please save your logged-in Facebook Cookie under "Settings → Marketplace price extraction" first — Marketplace links can only be imported with a cookie.',
+    scraping:'Extracting info from link…', scraped:'Imported from link — please verify before saving.', foundImgs:'Extracted {n} images (external links, not downloaded).', scrapeFail:'Extraction failed. Check the link or try again.',
     ready:'Ready', statusSaved:'Saved {n} items · ', gitPublished:'auto-publishing', notPushed:'not pushed:', saving:'Saving…',
     err:'Error: ', addProductTitle:'Add Item'
   }
@@ -2543,6 +2481,10 @@ function applyLang() {
   document.querySelectorAll('[data-i18n]').forEach(el => {
     const k = el.getAttribute('data-i18n');
     if (d[k] != null) el.textContent = d[k];
+  });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => {
+    const k = el.getAttribute('data-i18n-ph');
+    if (d[k] != null) el.placeholder = d[k];
   });
   document.getElementById('langToggle').textContent = (LANG === 'zh') ? 'EN' : '中文';
   document.getElementById('langToggle').title = (LANG === 'zh') ? 'Switch to English' : '切换为中文';
