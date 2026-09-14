@@ -547,8 +547,9 @@ def thumb_html(p):
 
 def verify_images(products):
     """把图片字段规范成 imgs 列表; 外链 URL 原样保留, 本地图规范化成
-    images/ 下相对路径, 并裁掉不存在的。"""
+    images/ 下相对路径, 并裁掉不存在的。同时剪掉已废弃的 category 字段。"""
     for p in products:
+        p.pop("cat", None)
         imgs = product_imgs(p)
         clean = []
         for im in imgs:
@@ -980,7 +981,6 @@ def render_index(products):
               <div class="card-thumb">%s%s</div>
               <div class="card-name">%s</div>
               <div class="card-price">%s</div>
-              <div class="card-cat">%s</div>
             </button>"""
             % (
                 esc(p.get("name", "")),
@@ -989,7 +989,6 @@ def render_index(products):
                 badge,
                 esc(p.get("name", "")),
                 price_html,
-                esc(p.get("cat", "")),
             )
         )
     if cards:
@@ -1743,7 +1742,7 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
 <div class="table-wrap">
 <table>
   <thead>
-    <tr><th data-i18n="thImg">图片</th><th data-i18n="thName">名称</th><th data-i18n="thPrice">价格</th><th data-i18n="thCat">分类</th><th data-i18n="thDesc">简介</th><th data-i18n="thLink">购买链接</th><th data-i18n="thOp">操作</th></tr>
+    <tr><th data-i18n="thImg">图片</th><th data-i18n="thName">名称</th><th data-i18n="thPrice">价格</th><th data-i18n="thDesc">简介</th><th data-i18n="thLink">购买链接</th><th data-i18n="thOp">操作</th></tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
@@ -1760,8 +1759,6 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
     <input type="text" id="f_price" inputmode="decimal" placeholder="$" oninput="onPriceInput()">
     <label data-i18n="lblSym">货币符号（留空用全局默认）</label>
     <input type="text" id="f_sym" placeholder="$ / ¥ / NT$ …" oninput="onSymInput()" style="max-width:140px">
-    <label data-i18n="lblCat">分类</label>
-    <input type="text" id="f_cat">
     <label data-i18n="lblDesc">简介</label>
     <textarea id="f_desc"></textarea>
     <label data-i18n="lblBuyLink">购买链接 (Facebook Marketplace 页)</label>
@@ -1884,7 +1881,6 @@ function imgsOf(p) {
 }
 function matches(p, q) {
   return (p.name || '').toLowerCase().indexOf(q) >= 0 ||
-         (p.cat || '').toLowerCase().indexOf(q) >= 0 ||
          (p.desc || '').toLowerCase().indexOf(q) >= 0 ||
          (p.buy || '').toLowerCase().indexOf(q) >= 0;
 }
@@ -1904,7 +1900,6 @@ function renderRows() {
     '<td><div class="rowimg-cell">' + cell + '</div></td>' +
     '<td><b>' + p.name + '</b></td>' +
     '<td>' + dispPrice(p) + '</td>' +
-    '<td>' + p.cat + '</td>' +
     '<td class="small">' + (p.desc ? p.desc.substring(0, 30) : '') + '</td>' +
     '<td><a class="small" href="' + p.buy + '" target="_blank">' + (I18N[LANG].openLink || '打开') + '</a></td>' +
     '<td>' +
@@ -1967,7 +1962,6 @@ function edit(i) {
   const pr = (p.price || '').trim();
   _prRaw = /^[0-9.,]+$/.test(pr) ? pr : '';
   document.getElementById('f_price').value = /^[0-9.,]+$/.test(pr) ? (priceSym() + pr) : pr;
-  document.getElementById('f_cat').value = p.cat || '';
   document.getElementById('f_desc').value = p.desc || '';
   document.getElementById('f_buy').value = p.buy || '';
   document.getElementById('f_buy_text').value = p.buy_text || '';
@@ -1983,7 +1977,6 @@ function resetForm() {
   _prRaw = '';
   document.getElementById('f_sym').value = '';
   document.getElementById('f_price').value = '';
-  document.getElementById('f_cat').value = '';
   document.getElementById('f_desc').value = '';
   document.getElementById('f_buy').value = 'https://www.facebook.com/marketplace/';
   document.getElementById('f_buy_text').value = '';
@@ -2161,7 +2154,6 @@ async function save(ev) {
   const boxPrice = document.getElementById('f_price').value.trim();
   item.price = (_prRaw !== '' || boxPrice === '') ? _prRaw : boxPrice;
   item.sym = document.getElementById('f_sym').value.trim();
-  item.cat = document.getElementById('f_cat').value.trim();
   item.desc = document.getElementById('f_desc').value.trim();
   item.buy = document.getElementById('f_buy').value.trim() || 'https://www.facebook.com/marketplace/';
   item.buy_text = document.getElementById('f_buy_text').value.trim();
@@ -2420,8 +2412,8 @@ const I18N = {
   zh: {
     title:'商品管理后台', preview:'预览首页 →', settings:'⚙ 网站设置', addItem:'＋ 新增商品',
     tip:'改动后自动重写 index.html。图片上传到 images/ 文件夹。',
-    thImg:'图片', thName:'名称', thPrice:'价格', thCat:'分类', thDesc:'简介', thLink:'购买链接', thOp:'操作',
-    editItem:'编辑商品', lblName:'名称', lblPrice:'价格（直接输入数字，自动加符号）', lblSym:'货币符号（留空用全局默认）', lblCat:'分类', lblDesc:'简介',
+    thImg:'图片', thName:'名称', thPrice:'价格', thDesc:'简介', thLink:'购买链接', thOp:'操作',
+    editItem:'编辑商品', lblName:'名称', lblPrice:'价格（直接输入数字，自动加符号）', lblSym:'货币符号（留空用全局默认）', lblDesc:'简介',
     lblBuyLink:'购买链接 (Facebook Marketplace 页)', lblBuyText:'购买按钮文案（留空用全局默认）', lblImg:'商品图片',
     lblImgHint:'可上传多张，第一张为列表封面。点 “＋ 添加图片” 继续选择。', lblCover:'封面',
     addImgBtn:'＋ 添加图片', btnLinkImg:'＋ 外链图片', uploading:'上传图片…',
@@ -2437,7 +2429,7 @@ const I18N = {
     lblGitUser:'GitHub 用户名', lblGitToken:'GitHub Token (PAT)', btnSaveGitAuth:'保存 GitHub 凭据',
     gitCredNeedBoth:'请填写 GitHub 用户名和 Token（登录后推送用，不回显）', gitCredSaving:'正在保存凭据…',
     gitCredOk:'凭据已保存·', gitCredFail:'凭据保存失败: ',
-    searchPlaceholder:'搜索商品（名称/分类/简介/链接）…', countItems:'共 {n} 件商品', matchItems:' · 匹配 {n} 条',
+    searchPlaceholder:'搜索商品（名称/简介/链接）…', countItems:'共 {n} 件商品', matchItems:' · 匹配 {n} 条',
     rowEdit:'编辑', rowDel:'删', btnAdd:'＋ 新增商品', openLink:'打开',
     btnScrape:'◆ 从 Marketplace 链接导入', lblScrapeHint:'自动提取 名称/价格/简介/图片链接（不下载）',
     promptScrapeUrl:'粘贴 Facebook Marketplace 商品链接（自动提取图片链接/价格/简介）：',
@@ -2448,8 +2440,8 @@ const I18N = {
   en: {
     title:'Item Admin', preview:'Preview →', settings:'⚙ Settings', addItem:'＋ Add Item',
     tip:'Every change rewrites index.html. Uploaded images go into images/.',
-    thImg:'Image', thName:'Name', thPrice:'Price', thCat:'Category', thDesc:'Description', thLink:'Buy Link', thOp:'Actions',
-    editItem:'Edit Item', lblName:'Name', lblPrice:'Price (type numbers, symbol added automatically)', lblSym:'Currency symbol (blank = global default)', lblCat:'Category', lblDesc:'Description',
+    thImg:'Image', thName:'Name', thPrice:'Price', thDesc:'Description', thLink:'Buy Link', thOp:'Actions',
+    editItem:'Edit Item', lblName:'Name', lblPrice:'Price (type numbers, symbol added automatically)', lblSym:'Currency symbol (blank = global default)', lblDesc:'Description',
     lblBuyLink:'Buy Link (Facebook Marketplace)', lblBuyText:'Buy button text (blank = global default)', lblImg:'Images',
     lblImgHint:'You can add multiple images. The first one is the cover. Click “＋ Add image” to add more.', lblCover:'Cover',
     addImgBtn:'＋ Add image', btnLinkImg:'＋ Image URL', uploading:'Uploading…',
@@ -2465,7 +2457,7 @@ const I18N = {
     lblGitUser:'GitHub username', lblGitToken:'GitHub Token (PAT)', btnSaveGitAuth:'Save GitHub credentials',
     gitCredNeedBoth:'Fill in both the GitHub username and a Token (used for push, never echoed)', gitCredSaving:'Saving credentials…',
     gitCredOk:'Credentials saved ·', gitCredFail:'Failed to save credentials: ',
-    searchPlaceholder:'Search items (name/category/desc/link)…', countItems:'{n} items', matchItems:' · {n} shown',
+    searchPlaceholder:'Search items (name/desc/link)…', countItems:'{n} items', matchItems:' · {n} shown',
     rowEdit:'Edit', rowDel:'Del', btnAdd:'＋ Add Item', openLink:'Open',
     btnScrape:'◆ Import from Marketplace link', lblScrapeHint:'Auto-fills name/price/description/image links (kept as links, not downloaded)',
     promptScrapeUrl:'Paste a Facebook Marketplace item link (extracts image links/price/description):',

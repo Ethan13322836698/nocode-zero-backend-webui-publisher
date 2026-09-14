@@ -18,7 +18,7 @@ The whole app is one ~1850-line stdlib-only Python file: HTTP server, JSON API h
 - Marketplace extraction is limited by FB's own design: logged-in item pages are a **JS shell with no price/photo data in HTML** (data comes from private `/api/graphql/` queries whose `doc_id`s rotate — don't rely on them). Anonymous SEO pages give the cleanest name/description/cover-image. Price and the full photo set are **not** reliably obtainable server-side; the best result is name + description + cover image.
 
 ## Product schema (`products.json`)
-`name`, `price` (numeric string; currency symbol is prefixed at render time), `sym` (per-item symbol override), `cat`, `desc`, `buy` (Facebook Marketplace URL), `buy_text`, `imgs` (image list), `img` (first/cover copy). On save `verify_images()` normalizes to `imgs` + `img`; external `http(s)://` images are kept as-is, local ones become `images/<name>`.
+`name`, `price` (numeric string; currency symbol is prefixed at render time), `sym` (per-item symbol override), `desc`, `buy` (Facebook Marketplace URL), `buy_text`, `imgs` (image list), `img` (first/cover copy). Category (`cat`) was removed; `verify_images()` prunes it on save. On save `verify_images()` normalizes to `imgs` + `img`; external `http(s)://` images are kept as-is, local ones become `images/<name>`.
 
 ## Conventions
 - Comments/docstrings are Chinese; keep new code in the same style.

@@ -124,7 +124,6 @@ img { max-width: 100%; display: block; }
 }
 .card-name { font-size: 17px; font-weight: 700; margin-bottom: 4px; }
 .card-price { font-size: 15px; font-weight: 800; }
-.card-cat { margin-top: 4px; font-size: 11px; letter-spacing: 1px; color: var(--gray); text-transform: uppercase; }
 
 /* ---------- Empty ---------- */
 .empty { text-align: center; padding: 60px 0; color: var(--gray); }
