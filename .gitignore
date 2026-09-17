@@ -6,6 +6,12 @@ setup.json
 # FB Cookie 加密密钥(机器本地, 绝不提交; 丢了只能重填 Cookie)
 fb.cookie.key
 
+# FB 浏览器登录态(机器本地的 Chromium persistent context, 含真实 Cookie, 绝不提交)
+.fb_browser_profile/
+
+# 本地虚拟环境(装 playwright 用, 每台机器自己装)
+.venv/
+
 # Python 缓存
 __pycache__/
 *.pyc

@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 黑白极简 · 商品管理 Server
-Python3 标准库实现, 无任何第三方依赖。
+Python3 标准库实现; 仅 Facebook 完整图片轮播抓取这一项功能可选依赖 playwright
+(见 requirements.txt), 未安装时该功能静默降级(退回只抓一张封面图), 其余功能不受影响。
 
 用法:
     python3 server.py            启动后打开 http://127.0.0.1:8000/admin
@@ -42,6 +43,7 @@ IMAGES_DIR = os.path.join(HERE, "images")
 INDEX_FILE = os.path.join(HERE, "index.html")
 FB_KEY_FILE = os.path.join(HERE, "fb.cookie.key")
 FB_ENC_PREFIX = "FB-ENC:v1:"
+FB_PROFILE_DIR = os.path.join(HERE, ".fb_browser_profile")
 
 PORT = int(os.environ.get("BWMARKET_PORT", "8000"))
 EMOJI_FALLBACK = "◼"
@@ -545,6 +547,27 @@ def thumb_html(p):
     return '<div class="ph">◼</div>'
 
 
+_FB_ITEM_RE = re.compile(r"marketplace/item/(\d+)")
+
+
+def _fb_item_id(url):
+    m = _FB_ITEM_RE.search(url or "")
+    return m.group(1) if m else None
+
+
+def find_duplicate_fb_listing(products):
+    """若列表里有两个商品指向同一个 Facebook Marketplace 商品 ID, 返回其中一个的名称; 否则 None。"""
+    seen = {}
+    for p in products:
+        item_id = _fb_item_id((p or {}).get("buy"))
+        if not item_id:
+            continue
+        if item_id in seen:
+            return p.get("name") or seen[item_id] or item_id
+        seen[item_id] = p.get("name") or item_id
+    return None
+
+
 def verify_images(products):
     """把图片字段规范成 imgs 列表; 外链 URL 原样保留, 本地图规范化成
     images/ 下相对路径, 并裁掉不存在的。同时剪掉已废弃的 category 字段。"""
@@ -718,6 +741,27 @@ def _unescape_json_url(u):
                   lambda m: chr(int(m.group(1), 16)), u.replace("\\/", "/"))
 
 
+def _dedup_photo_urls(urls, limit=40):
+    """同一张照片的不同尺寸变体按「照片ID」(URL 里 <id>_<seq>_ 那段)去重, 保留先出现的。"""
+    out = []
+    seen_ids = set()
+    for u in urls:
+        u = (u or "").strip()
+        if not u or "/v/" not in u or "\\" in u:
+            continue
+        if re.search(r"/cp[0-9]+", u):  # 头像角标缩略图, 跳过
+            continue
+        if len(out) >= limit:
+            break
+        mid = re.search(r"/(\d+)_\d+_[a-z0-9_]*\.(?:jpg|jpeg|png|webp)", u, re.I)
+        key = mid.group(1) if mid else u
+        if key in seen_ids:
+            continue
+        seen_ids.add(key)
+        out.append(u)
+    return out
+
+
 def _extract_img_urls(html_txt):
     """提取页面里的 FB CDN 图片 URL, 保留完整签名查询串(?stp=...&oh=...&oe=...,
     截断会变成打不开的 403 死链)。同一张照片的不同尺寸变体按照片ID去重。"""
@@ -725,23 +769,83 @@ def _extract_img_urls(html_txt):
                  lambda m: chr(int(m.group(1), 16)), html_txt or "")
     txt = txt.replace("\\/", "/")
     txt = html.unescape(txt)  # 还原 &amp; 实体, 得到真实带 & 的查询参数
-    urls = []
-    seen_ids = set()
-    for u in re.findall(r"https://scontent[^\"'<> )]+\.(?:jpg|jpeg|png|webp)[^\"'<> )]*", txt, re.I):
-        u = u.strip()
-        if "/v/" not in u or "\\" in u:
-            continue
-        if re.search(r"/cp[0-9]+", u):  # 头像角标缩略图, 跳过
-            continue
-        if len(urls) >= 40:
-            break
-        mid = re.search(r"/(\d+)_\d+_[a-z0-9_]*\.(?:jpg|jpeg|png|webp)", u, re.I)
-        key = mid.group(1) if mid else u
-        if key in seen_ids:
-            continue
-        seen_ids.add(key)
-        urls.append(u)
-    return urls
+    return _dedup_photo_urls(
+        re.findall(r"https://scontent[^\"'<> )]+\.(?:jpg|jpeg|png|webp)[^\"'<> )]*", txt, re.I))
+
+
+def _playwright_sync():
+    """惰性导入 playwright.sync_api; 未安装则返回 None(功能优雅降级)。"""
+    try:
+        from playwright.sync_api import sync_playwright
+        return sync_playwright
+    except ImportError:
+        return None
+
+
+_fb_login_status = {"running": False, "ok": None, "msg": ""}
+_fb_login_lock = threading.Lock()
+
+
+def start_browser_login():
+    """后台线程打开登录窗口, 立即返回状态, 供 /api/fb/login-status 轮询进度。"""
+    with _fb_login_lock:
+        if _fb_login_status.get("running"):
+            return False, "已有登录窗口打开中, 请先完成或关闭它"
+        _fb_login_status.update(running=True, ok=None, msg="浏览器窗口已打开, 请在窗口里登录后关闭它")
+    def _run():
+        ok, msg = browser_login_facebook()
+        with _fb_login_lock:
+            _fb_login_status.update(running=False, ok=ok, msg=msg)
+    threading.Thread(target=_run, daemon=True).start()
+    return True, "已打开登录窗口"
+
+
+def browser_login_facebook():
+    """打开一个可见的、带持久化会话的浏览器窗口停在 Facebook 登录页, 供用户手动登录。
+    登录态(Cookie)会自动写入 FB_PROFILE_DIR, 供之后的无头抓取复用。
+    该函数会阻塞直到用户关闭浏览器窗口, 所以调用方应在后台线程里跑。"""
+    sync_playwright = _playwright_sync()
+    if not sync_playwright:
+        return False, "未安装 playwright, 无法打开浏览器"
+    os.makedirs(FB_PROFILE_DIR, exist_ok=True)
+    try:
+        with sync_playwright() as p:
+            ctx = p.chromium.launch_persistent_context(FB_PROFILE_DIR, headless=False)
+            try:
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                page.goto("https://www.facebook.com/login", timeout=30000)
+                while ctx.pages:
+                    time.sleep(1)
+            finally:
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+        return True, "浏览器已关闭, 登录态已保存"
+    except Exception as e:
+        return False, str(e)
+
+
+def browser_extract_images(url, timeout_ms=20000):
+    """用已登录的持久化浏览器实际渲染商品页, 从 DOM 里读取完整的图片轮播(而非只有
+    匿名 SEO 页里的那一张封面图)。未安装 playwright 或未登录过时, 静默返回 []。"""
+    sync_playwright = _playwright_sync()
+    if not sync_playwright or not os.path.isdir(FB_PROFILE_DIR):
+        return []
+    try:
+        with sync_playwright() as p:
+            ctx = p.chromium.launch_persistent_context(FB_PROFILE_DIR, headless=True)
+            try:
+                page = ctx.new_page()
+                page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+                page.wait_for_timeout(1500)  # 留时间给缩略图轮播渲染完
+                srcs = page.eval_on_selector_all(
+                    "img[src*='scontent']", "els => els.map(e => e.src)")
+            finally:
+                ctx.close()
+        return _dedup_photo_urls(srcs)
+    except Exception:
+        return []
 
 
 def _decent_desc(t, skip_text=""):
@@ -892,8 +996,11 @@ def scrape_marketplace(url, cookie=None):
     策略: FB 桌面商品页登录后是纯 JS 壳(SRP 不含价格/图片数据), 反而是
     匿名 SEO 版的名字/简介/封面图最干净——所以一律先匿名抓一份做基础,
     再在有 Cookie 时补抓一次登录态(万一登录态能拿到更多图/价),
-    最后按「照片ID去重 + 字段择优」合并。"""
-    m = re.search(r"marketplace/item/(\d+)", url or "")
+    最后按「照片ID去重 + 字段择优」合并。
+    匿名/Cookie 抓的静态 HTML 里最多只有一张封面图(FB 完整轮播图是登录后
+    客户端 JS 拉的, 纯文本抓取拿不到), 所以图片这块额外用一个真实登录过的
+    浏览器(browser_extract_images)把页面渲染出来读 DOM, 能拿到就整体替换。"""
+    m = _FB_ITEM_RE.search(url or "")
     if not m:
         return {"ok": False, "error": "不是有效的 Facebook Marketplace 商品链接，请使用形如 …/marketplace/item/123456789/ 的地址"}
     item_id = m.group(1)
@@ -948,6 +1055,12 @@ def scrape_marketplace(url, cookie=None):
             if not result.get(k) and p.get(k):
                 result[k] = p[k]
                 break
+
+    # 图片: 若有登录过的浏览器, 用它渲染出真实页面读取完整轮播图, 整体替换掉上面
+    # 只有一张封面图的结果(拿不到/未登录时静默保留原样, 不影响其它字段)。
+    browser_imgs = browser_extract_images(buy)
+    if browser_imgs:
+        result["imgs"] = browser_imgs
     return result
 
 
@@ -1124,6 +1237,12 @@ class Handler(BaseHTTPRequestHandler):
             st = git_status()
             st["push"] = push_status()
             self._json(200, st)
+        elif path == "/api/fb/login-status":
+            with _fb_login_lock:
+                st = dict(_fb_login_status)
+            st["logged_in"] = os.path.isdir(FB_PROFILE_DIR) and bool(os.listdir(FB_PROFILE_DIR))
+            st["available"] = _playwright_sync() is not None
+            self._json(200, st)
         elif path.startswith("/images/"):
             self._serve_image(path)
         else:
@@ -1169,6 +1288,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_upload()
         elif path == "/api/scrape/marketplace":
             self._handle_scrape_marketplace()
+        elif path == "/api/fb/login":
+            self._handle_fb_login()
         else:
             self._send(404, "<h1>404</h1>")
 
@@ -1311,6 +1432,10 @@ class Handler(BaseHTTPRequestHandler):
             products = json.loads(body)
             if not isinstance(products, list):
                 raise ValueError("body must be a list")
+            dup = find_duplicate_fb_listing(products)
+            if dup:
+                self._json(409, {"ok": False, "error": "This Facebook Marketplace listing has already been added: \"%s\"" % dup})
+                return
             products = verify_images(products)
             save_products(products)
             # 重写 index.html
@@ -1364,6 +1489,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200 if data.get("ok") else 400, data)
         except Exception as e:
             self._json(400, {"ok": False, "error": str(e)})
+
+    def _handle_fb_login(self):
+        """打开一个真实浏览器窗口登录 Facebook, 登录态之后供抓完整图片轮播用。"""
+        if _playwright_sync() is None:
+            self._json(400, {"ok": False, "error": "未安装 playwright, 请先安装(见 requirements.txt)"})
+            return
+        ok, msg = start_browser_login()
+        self._json(200 if ok else 409, {"ok": ok, "msg": msg})
 
     def admin_page(self):
         products = load_products()
@@ -1858,6 +1991,14 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
       </div>
       <p class="muted" id="gitStatusHint" style="margin-top:8px">— 远程仓库未配置 —</p>
     </fieldset>
+    <fieldset>
+      <legend class="muted" data-i18n="legendFbLogin">Facebook 登录（抓取完整图片轮播）</legend>
+      <p class="muted" data-i18n="lblFbLoginHint">默认只能抓到一张封面图；登录一次后，导入商品时会用登录态渲染出完整的图片轮播。</p>
+      <div class="form-row" style="align-items:center">
+        <button type="button" class="btn" onclick="fbBrowserLogin()" data-i18n="btnFbLogin">登录 Facebook</button>
+        <span class="muted" id="fbLoginHint">‐</span>
+      </div>
+    </fieldset>
     <div class="form-actions">
       <button type="button" class="btn" onclick="hideSettings()" data-i18n="btnCancel">取消</button>
       <button type="submit" class="btn" data-i18n="btnSaveSettings">保存设置</button>
@@ -2262,6 +2403,7 @@ function openSettings() {
   document.getElementById('s_git_enabled').checked = (g.enabled !== false);
   document.getElementById('settingsOverlay').classList.remove('hidden');
   loadGitStatus();
+  loadFbLoginStatus();
 }
 function hideSettings() {
   document.getElementById('settingsOverlay').classList.add('hidden');
@@ -2284,6 +2426,43 @@ async function loadGitStatus() {
     }
   } catch (e) {
     document.getElementById('gitStatusHint').textContent = '读取 git 状态失败';
+  }
+}
+
+async function loadFbLoginStatus() {
+  const L = I18N[LANG] || I18N.zh;
+  const el = document.getElementById('fbLoginHint');
+  try {
+    const r = await fetch('/api/fb/login-status');
+    const j = await r.json();
+    if (!j.available) { el.textContent = L.fbLoginUnavailable; return; }
+    if (j.running) { el.textContent = L.fbLoginRunning; return; }
+    el.textContent = j.logged_in ? L.fbLoginOk : L.fbLoginNone;
+  } catch (e) {
+    el.textContent = L.fbLoginUnknown;
+  }
+}
+
+async function fbBrowserLogin() {
+  const L = I18N[LANG] || I18N.zh;
+  const el = document.getElementById('fbLoginHint');
+  try {
+    const r = await fetch('/api/fb/login', { method: 'POST' });
+    const j = await r.json();
+    if (!j.ok) { el.textContent = (j.error || j.msg || L.fbLoginFail); return; }
+    el.textContent = L.fbLoginRunning;
+    // 轮询直到登录窗口关闭
+    for (let i = 0; i < 300; i++) {
+      await new Promise(res => setTimeout(res, 1000));
+      const r2 = await fetch('/api/fb/login-status');
+      const s = await r2.json();
+      if (!s.running) {
+        el.textContent = s.logged_in ? L.fbLoginOk : (s.msg || L.fbLoginNone);
+        break;
+      }
+    }
+  } catch (e) {
+    el.textContent = L.fbLoginFail + e.message;
   }
 }
 
@@ -2429,6 +2608,11 @@ const I18N = {
     lblGitUser:'GitHub 用户名', lblGitToken:'GitHub Token (PAT)', btnSaveGitAuth:'保存 GitHub 凭据',
     gitCredNeedBoth:'请填写 GitHub 用户名和 Token（登录后推送用，不回显）', gitCredSaving:'正在保存凭据…',
     gitCredOk:'凭据已保存·', gitCredFail:'凭据保存失败: ',
+    legendFbLogin:'Facebook 登录（抓取完整图片轮播）',
+    lblFbLoginHint:'默认只能抓到一张封面图；登录一次后，导入商品时会用登录态渲染出完整的图片轮播。',
+    btnFbLogin:'登录 Facebook',
+    fbLoginUnavailable:'未安装 playwright, 此功能不可用', fbLoginRunning:'登录窗口已打开，请在窗口里登录后关闭它…',
+    fbLoginOk:'已登录 ✓', fbLoginNone:'尚未登录', fbLoginUnknown:'读取登录状态失败', fbLoginFail:'打开登录窗口失败: ',
     searchPlaceholder:'搜索商品（名称/简介/链接）…', countItems:'共 {n} 件商品', matchItems:' · 匹配 {n} 条',
     rowEdit:'编辑', rowDel:'删', btnAdd:'＋ 新增商品', openLink:'打开',
     btnScrape:'◆ 从 Marketplace 链接导入', lblScrapeHint:'自动提取 名称/价格/简介/图片链接（不下载）',
@@ -2457,6 +2641,11 @@ const I18N = {
     lblGitUser:'GitHub username', lblGitToken:'GitHub Token (PAT)', btnSaveGitAuth:'Save GitHub credentials',
     gitCredNeedBoth:'Fill in both the GitHub username and a Token (used for push, never echoed)', gitCredSaving:'Saving credentials…',
     gitCredOk:'Credentials saved ·', gitCredFail:'Failed to save credentials: ',
+    legendFbLogin:'Facebook login (fetch full photo carousel)',
+    lblFbLoginHint:'Without logging in, only one cover photo can be scraped. Log in once and imports will render the listing with a real session to grab all photos.',
+    btnFbLogin:'Log in to Facebook',
+    fbLoginUnavailable:'playwright not installed, this feature is unavailable', fbLoginRunning:'Login window is open, log in and close it…',
+    fbLoginOk:'Logged in ✓', fbLoginNone:'Not logged in yet', fbLoginUnknown:'Failed to read login status', fbLoginFail:'Failed to open login window: ',
     searchPlaceholder:'Search items (name/desc/link)…', countItems:'{n} items', matchItems:' · {n} shown',
     rowEdit:'Edit', rowDel:'Del', btnAdd:'＋ Add Item', openLink:'Open',
     btnScrape:'◆ Import from Marketplace link', lblScrapeHint:'Auto-fills name/price/description/image links (kept as links, not downloaded)',

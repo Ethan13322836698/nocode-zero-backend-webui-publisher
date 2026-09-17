@@ -6,12 +6,16 @@ set -e
 cd "$(dirname "$0")"
 
 PY=""
-for cmd in python3 python; do
-  if command -v "$cmd" >/dev/null 2>&1; then
-    PY="$cmd"
-    break
-  fi
-done
+if [ -x ".venv/bin/python3" ]; then
+  PY=".venv/bin/python3"
+else
+  for cmd in python3 python; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+      PY="$cmd"
+      break
+    fi
+  done
+fi
 
 if [ -z "$PY" ]; then
   echo "[错误] 未找到 python3 或 python，请先安装 Python 3。"

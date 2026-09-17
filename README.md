@@ -76,5 +76,14 @@ GIT = {
 
 ## 本地依赖
 
-- Python 3（标准库即可，无第三方依赖）
+- Python 3（标准库即可，核心功能无第三方依赖）
 - `git`（用于自动提交推送）
+- （可选）`playwright`：仅用于「从 Facebook Marketplace 导入」时抓取商品的**完整图片轮播**。不装也能正常使用，只是导入时只能拿到一张封面图。安装：
+
+  ```bash
+  python3 -m venv .venv
+  .venv/bin/pip install -r requirements.txt
+  .venv/bin/python -m playwright install chromium
+  ```
+
+  装好后 `bash run.sh` 会自动优先用 `.venv` 里的 Python。首次使用前，去后台「⚙ 网站设置 → Facebook 登录」点一次「登录 Facebook」，在弹出的浏览器窗口里登录后关闭即可，登录态会保存在本地 `.fb_browser_profile/`（不会被提交到 git）。

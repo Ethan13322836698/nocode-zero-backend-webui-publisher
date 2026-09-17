@@ -112,7 +112,16 @@ From **Settings** in the WebUI, without touching code:
 
 ## Requirements
 
-- **Python 3** (standard library only — zero dependencies)
+- **Python 3** (standard library only for core features)
 - **git** (for auto commit/push)
+- *(optional)* **playwright** — only needed to grab a listing's **full photo carousel** when importing from Facebook Marketplace. Without it, import still works, just with a single cover photo. Install:
+
+  ```bash
+  python3 -m venv .venv
+  .venv/bin/pip install -r requirements.txt
+  .venv/bin/python -m playwright install chromium
+  ```
+
+  `bash run.sh` automatically prefers `.venv`'s Python once it exists. Before first use, open admin → **⚙ Settings → Facebook login** and click "Log in to Facebook" once — log in in the browser window that opens, then close it. The session is saved locally in `.fb_browser_profile/` (never committed to git).
 
 *Free forever on GitHub Pages. Nothing else to install or pay for.*
