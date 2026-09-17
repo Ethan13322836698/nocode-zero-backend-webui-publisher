@@ -1,6 +1,7 @@
 # 运行时本地配置(每台机器/每个用户不同, 不提交)
 site.json
 setup.json
+stats.json
 .git-credentials
 
 # FB Cookie 加密密钥(机器本地, 绝不提交; 丢了只能重填 Cookie)

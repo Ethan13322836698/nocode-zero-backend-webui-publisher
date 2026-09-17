@@ -39,6 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(HERE, "products.json")
 SITE_FILE = os.path.join(HERE, "site.json")
+STATS_FILE = os.path.join(HERE, "stats.json")
 IMAGES_DIR = os.path.join(HERE, "images")
 INDEX_FILE = os.path.join(HERE, "index.html")
 FB_KEY_FILE = os.path.join(HERE, "fb.cookie.key")
@@ -130,6 +131,70 @@ def load_products():
 def save_products(products):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(products, f, ensure_ascii=False, indent=2)
+
+
+def _product_identity(p):
+    """商品没有 id 字段, 用来判断"这条是不是新增的"的稳定标识: 有 Facebook 链接就用
+    商品 ID, 否则退化用 (名称, 购买链接)。"""
+    item_id = _fb_item_id((p or {}).get("buy"))
+    if item_id:
+        return "fb:" + item_id
+    return "nb:" + (p or {}).get("name", "") + "|" + (p or {}).get("buy", "")
+
+
+def count_new_products(old_products, new_products):
+    """对比保存前后的商品列表, 数出真正新增的条数(编辑/删除/排序都不算)。"""
+    old_ids = {_product_identity(p) for p in old_products}
+    return sum(1 for p in new_products if _product_identity(p) not in old_ids)
+
+
+def load_stats():
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    data.setdefault("total_uploads", 0)
+                    data.setdefault("recent_uploads", [])
+                    return data
+        except Exception:
+            pass
+    return {"total_uploads": 0, "recent_uploads": []}
+
+
+def save_stats(stats):
+    with open(STATS_FILE, "w", encoding="utf-8") as f:
+        json.dump(stats, f)
+
+
+_stats_lock = threading.Lock()
+
+
+def record_new_uploads(n):
+    """记 n 条新增商品: 累计总数 +n, 并记下时间戳供"过去12小时"统计用(旧的定期清掉,
+    文件不会无限变大)。"""
+    if n <= 0:
+        return
+    with _stats_lock:
+        stats = load_stats()
+        now = time.time()
+        stats["total_uploads"] = stats.get("total_uploads", 0) + n
+        recent = stats.get("recent_uploads", [])
+        recent.extend([now] * n)
+        cutoff = now - 24 * 3600  # 留 24 小时缓冲, 比"过去12小时"查询窗口宽松一点
+        stats["recent_uploads"] = [t for t in recent if t >= cutoff]
+        save_stats(stats)
+
+
+def stats_summary():
+    with _stats_lock:
+        stats = load_stats()
+    now = time.time()
+    last12h = sum(1 for t in stats.get("recent_uploads", []) if t >= now - 12 * 3600)
+    total = stats.get("total_uploads", 0)
+    earnings = (total // 10) * 0.5
+    return {"total": total, "last12h": last12h, "earnings": round(earnings, 2),
+            "until_next_payout": (10 - total % 10) % 10}
 
 
 def _deep_merge(base, extra):
@@ -555,16 +620,39 @@ def _fb_item_id(url):
     return m.group(1) if m else None
 
 
-def find_duplicate_fb_listing(products):
-    """若列表里有两个商品指向同一个 Facebook Marketplace 商品 ID, 返回其中一个的名称; 否则 None。"""
-    seen = {}
+def _fb_item_id_counts(products):
+    counts = {}
     for p in products:
         item_id = _fb_item_id((p or {}).get("buy"))
-        if not item_id:
+        if item_id:
+            counts[item_id] = counts.get(item_id, 0) + 1
+    return counts
+
+
+def find_new_duplicate_fb_listing(old_products, new_products):
+    """只拦截"这次保存新引入的"撞车 Facebook 商品(某个 ID 在新列表里出现的次数比
+    保存前更多)。保存前就已经存在的旧重复不算数——不然旧数据没清理干净之前,
+    以后所有保存(哪怕跟那条旧重复毫不相干)都会被一直卡死。撞车就返回商品名, 否则 None。"""
+    old_counts = _fb_item_id_counts(old_products)
+    new_counts = _fb_item_id_counts(new_products)
+    for item_id, cnt in new_counts.items():
+        if cnt > 1 and cnt > old_counts.get(item_id, 0):
+            for p in new_products:
+                if _fb_item_id((p or {}).get("buy")) == item_id:
+                    return p.get("name") or item_id
+    return None
+
+
+def find_existing_product_by_fb_item(item_id, exclude_idx=None):
+    """已保存的商品列表里有没有同一个 Facebook 商品 ID; exclude_idx 用来排除"正在编辑
+    的这一条自己"(编辑时重新导入同一个链接刷新图片, 不该被判定为撞了自己)。"""
+    if not item_id:
+        return None
+    for i, p in enumerate(load_products()):
+        if exclude_idx is not None and i == exclude_idx:
             continue
-        if item_id in seen:
-            return p.get("name") or seen[item_id] or item_id
-        seen[item_id] = p.get("name") or item_id
+        if _fb_item_id((p or {}).get("buy")) == item_id:
+            return p.get("name") or item_id
     return None
 
 
@@ -826,26 +914,54 @@ def browser_login_facebook():
         return False, str(e)
 
 
-def browser_extract_images(url, timeout_ms=20000):
-    """用已登录的持久化浏览器实际渲染商品页, 从 DOM 里读取完整的图片轮播(而非只有
-    匿名 SEO 页里的那一张封面图)。未安装 playwright 或未登录过时, 静默返回 []。"""
+_CAROUSEL_JS = """
+els => {
+  // 商品自己的轮播图每张都用同一个 alt 文案(标题); 页面下方"你可能也喜欢"的推荐
+  // 商品卡片各有各的 alt(各自的商品名)。按 alt 分组, 取图片最多的那组, 就是轮播图,
+  // 不会混进推荐区的图。
+  const groups = {};
+  for (const el of els) {
+    const alt = (el.alt || '').trim();
+    if (!alt) continue;
+    (groups[alt] = groups[alt] || []).push(el.src);
+  }
+  let best = [];
+  for (const list of Object.values(groups)) {
+    if (list.length > best.length) best = list;
+  }
+  return best;
+}
+"""
+
+
+def browser_extract_listing(url, timeout_ms=20000):
+    """用已登录的持久化浏览器实际渲染商品页, 一次性读取 HTML 静态抓取拿不到的两项:
+    完整图片轮播 + 价格(登录后页面是 JS 壳, 这两项都要等 JS 跑完才会出现在 DOM/文本里)。
+    未安装 playwright 或未登录过时, 静默返回全空(上层原样保留 HTTP 抓取的结果)。"""
     sync_playwright = _playwright_sync()
     if not sync_playwright or not os.path.isdir(FB_PROFILE_DIR):
-        return []
+        return {"imgs": [], "price": None, "sym": None}
     try:
         with sync_playwright() as p:
             ctx = p.chromium.launch_persistent_context(FB_PROFILE_DIR, headless=True)
             try:
                 page = ctx.new_page()
-                page.goto(url, wait_until="networkidle", timeout=timeout_ms)
-                page.wait_for_timeout(1500)  # 留时间给缩略图轮播渲染完
-                srcs = page.eval_on_selector_all(
-                    "img[src*='scontent']", "els => els.map(e => e.src)")
+                # domcontentloaded 比 networkidle 快得多: FB 页面有持续的后台请求
+                # (埋点/长轮询), networkidle 经常要等到超时才返回; 读 img.src/文本不需要
+                # 图真的下载完, 只要 DOM 渲染出来就行。
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                try:
+                    page.wait_for_selector("img[src*='scontent']", timeout=8000)
+                except Exception:
+                    pass  # 没等到也继续按现状读一次, 好过直接判定失败
+                srcs = page.eval_on_selector_all("img[src*='scontent']", _CAROUSEL_JS)
+                body_text = page.inner_text("body")
             finally:
                 ctx.close()
-        return _dedup_photo_urls(srcs)
+        price, sym = _find_price(body_text)  # 页面正文里第一处价格 = 商品自己的价格
+        return {"imgs": _dedup_photo_urls(srcs), "price": price, "sym": sym}
     except Exception:
-        return []
+        return {"imgs": [], "price": None, "sym": None}
 
 
 def _decent_desc(t, skip_text=""):
@@ -997,9 +1113,10 @@ def scrape_marketplace(url, cookie=None):
     匿名 SEO 版的名字/简介/封面图最干净——所以一律先匿名抓一份做基础,
     再在有 Cookie 时补抓一次登录态(万一登录态能拿到更多图/价),
     最后按「照片ID去重 + 字段择优」合并。
-    匿名/Cookie 抓的静态 HTML 里最多只有一张封面图(FB 完整轮播图是登录后
-    客户端 JS 拉的, 纯文本抓取拿不到), 所以图片这块额外用一个真实登录过的
-    浏览器(browser_extract_images)把页面渲染出来读 DOM, 能拿到就整体替换。"""
+    匿名/Cookie 抓的静态 HTML 里最多只有一张封面图、价格也常常拿不到(这两项
+    是登录后客户端 JS 拉的, 纯文本抓取拿不到), 所以额外用一个真实登录过的
+    浏览器(browser_extract_listing)把页面渲染出来读 DOM/正文, 图片拿到就整体
+    替换, 价格拿到就覆盖(拿不到则保留上面 HTTP 抓取的结果)。"""
     m = _FB_ITEM_RE.search(url or "")
     if not m:
         return {"ok": False, "error": "不是有效的 Facebook Marketplace 商品链接，请使用形如 …/marketplace/item/123456789/ 的地址"}
@@ -1056,11 +1173,14 @@ def scrape_marketplace(url, cookie=None):
                 result[k] = p[k]
                 break
 
-    # 图片: 若有登录过的浏览器, 用它渲染出真实页面读取完整轮播图, 整体替换掉上面
-    # 只有一张封面图的结果(拿不到/未登录时静默保留原样, 不影响其它字段)。
-    browser_imgs = browser_extract_images(buy)
-    if browser_imgs:
-        result["imgs"] = browser_imgs
+    # 图片 + 价格: 若有登录过的浏览器, 用它渲染出真实页面读取(这两项匿名 HTML 抓不到,
+    # 图片会整体替换掉只有一张封面图的结果; 价格拿到才覆盖, 拿不到就保留上面 HTTP 抓的)。
+    browser_data = browser_extract_listing(buy)
+    if browser_data.get("imgs"):
+        result["imgs"] = browser_data["imgs"]
+    if browser_data.get("price"):
+        result["price"] = browser_data["price"]
+        result["sym"] = browser_data.get("sym") or result["sym"]
     return result
 
 
@@ -1243,6 +1363,8 @@ class Handler(BaseHTTPRequestHandler):
             st["logged_in"] = os.path.isdir(FB_PROFILE_DIR) and bool(os.listdir(FB_PROFILE_DIR))
             st["available"] = _playwright_sync() is not None
             self._json(200, st)
+        elif path == "/api/stats":
+            self._json(200, stats_summary())
         elif path.startswith("/images/"):
             self._serve_image(path)
         else:
@@ -1432,12 +1554,14 @@ class Handler(BaseHTTPRequestHandler):
             products = json.loads(body)
             if not isinstance(products, list):
                 raise ValueError("body must be a list")
-            dup = find_duplicate_fb_listing(products)
+            old_products = load_products()
+            dup = find_new_duplicate_fb_listing(old_products, products)
             if dup:
                 self._json(409, {"ok": False, "error": "This Facebook Marketplace listing has already been added: \"%s\"" % dup})
                 return
             products = verify_images(products)
             save_products(products)
+            record_new_uploads(count_new_products(old_products, products))
             # 重写 index.html
             with open(INDEX_FILE, "w", encoding="utf-8") as f:
                 f.write(render_index(products))
@@ -1482,6 +1606,15 @@ class Handler(BaseHTTPRequestHandler):
             url = (body.get("url") or "").strip()
             if not url:
                 self._json(400, {"ok": False, "error": "缺少链接地址"})
+                return
+            idx_raw = body.get("idx")
+            try:
+                exclude_idx = int(idx_raw) if idx_raw not in (None, "") else None
+            except (TypeError, ValueError):
+                exclude_idx = None
+            dup_name = find_existing_product_by_fb_item(_fb_item_id(url), exclude_idx=exclude_idx)
+            if dup_name:
+                self._json(400, {"ok": False, "error": "这个 Facebook Marketplace 商品已经导入过了: \"%s\"" % dup_name})
                 return
             # cookie: 设置了才用; 空串等价于未设置。未登录时也会尽力提取名称/简介/封面图。
             cookie = _normalize_cookie((body.get("cookie") or "").strip()) or None
@@ -1859,6 +1992,7 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
   <div class="toolbar-title">
     <h1 data-i18n="title">商品管理后台</h1>
     <span class="muted" id="totalCount" style="font-weight:700"></span>
+    <span class="muted" id="uploadStats" style="font-weight:700"></span>
     <span id="status" class="muted">就绪</span>
   </div>
   <div class="toolbar-actions">
@@ -1992,8 +2126,8 @@ textarea { resize: vertical; min-height: 80px; max-height: 50vh; }
       <p class="muted" id="gitStatusHint" style="margin-top:8px">— 远程仓库未配置 —</p>
     </fieldset>
     <fieldset>
-      <legend class="muted" data-i18n="legendFbLogin">Facebook 登录（抓取完整图片轮播）</legend>
-      <p class="muted" data-i18n="lblFbLoginHint">默认只能抓到一张封面图；登录一次后，导入商品时会用登录态渲染出完整的图片轮播。</p>
+      <legend class="muted" data-i18n="legendFbLogin">Facebook 登录（抓取完整图片轮播 + 价格）</legend>
+      <p class="muted" data-i18n="lblFbLoginHint">默认只能抓到一张封面图、价格也常抓不到；登录一次后，导入商品时会用登录态渲染出完整的图片轮播和价格。</p>
       <div class="form-row" style="align-items:center">
         <button type="button" class="btn" onclick="fbBrowserLogin()" data-i18n="btnFbLogin">登录 Facebook</button>
         <span class="muted" id="fbLoginHint">‐</span>
@@ -2254,10 +2388,11 @@ async function scrapeLink() {
   }
   setStatus(L.scraping, true);
   try {
+    const idxVal = document.getElementById('f_idx').value;
     const resp = await fetch('/api/scrape/marketplace', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: u })
+      body: JSON.stringify({ url: u, idx: idxVal === '' ? null : parseInt(idxVal, 10) })
     });
     const j = await resp.json();
     if (!j.ok) throw new Error(j.error || L.scrapeFail);
@@ -2336,6 +2471,7 @@ async function save(ev) {
     setStatus(I18N[LANG].statusSaved.replace('{n}', j.count) + (j.git ? I18N[LANG].gitPublished : I18N[LANG].notPushed + (j.git_msg||'')), true);
     renderRows();
     hideForm();
+    loadStats();
   } catch (e) {
     setStatus((I18N[LANG].err||'出错：') + e.message, false);
   }
@@ -2366,8 +2502,24 @@ async function saveList() {
     if (!j.ok) throw new Error(j.error || '保存失败');
     setStatus(I18N[LANG].statusSaved.replace('{n}', j.count) + (j.git ? I18N[LANG].gitPublished : I18N[LANG].notPushed + (j.git_msg||'')), true);
     renderRows();
+    loadStats();
   } catch (e) {
     setStatus((I18N[LANG].err||'出错：') + e.message, false);
+  }
+}
+
+async function loadStats() {
+  const L = I18N[LANG] || I18N.zh;
+  const el = document.getElementById('uploadStats');
+  try {
+    const r = await fetch('/api/stats');
+    const j = await r.json();
+    el.textContent = L.uploadStats
+      .replace('{total}', j.total)
+      .replace('{last12h}', j.last12h)
+      .replace('{earnings}', j.earnings.toFixed(2));
+  } catch (e) {
+    el.textContent = '';
   }
 }
 
@@ -2608,12 +2760,13 @@ const I18N = {
     lblGitUser:'GitHub 用户名', lblGitToken:'GitHub Token (PAT)', btnSaveGitAuth:'保存 GitHub 凭据',
     gitCredNeedBoth:'请填写 GitHub 用户名和 Token（登录后推送用，不回显）', gitCredSaving:'正在保存凭据…',
     gitCredOk:'凭据已保存·', gitCredFail:'凭据保存失败: ',
-    legendFbLogin:'Facebook 登录（抓取完整图片轮播）',
-    lblFbLoginHint:'默认只能抓到一张封面图；登录一次后，导入商品时会用登录态渲染出完整的图片轮播。',
+    legendFbLogin:'Facebook 登录（抓取完整图片轮播 + 价格）',
+    lblFbLoginHint:'默认只能抓到一张封面图、价格也常抓不到；登录一次后，导入商品时会用登录态渲染出完整的图片轮播和价格。',
     btnFbLogin:'登录 Facebook',
     fbLoginUnavailable:'未安装 playwright, 此功能不可用', fbLoginRunning:'登录窗口已打开，请在窗口里登录后关闭它…',
     fbLoginOk:'已登录 ✓', fbLoginNone:'尚未登录', fbLoginUnknown:'读取登录状态失败', fbLoginFail:'打开登录窗口失败: ',
     searchPlaceholder:'搜索商品（名称/简介/链接）…', countItems:'共 {n} 件商品', matchItems:' · 匹配 {n} 条',
+    uploadStats:'· 累计上传 {total} · 过去12小时 {last12h} · 预计收益 ${earnings}',
     rowEdit:'编辑', rowDel:'删', btnAdd:'＋ 新增商品', openLink:'打开',
     btnScrape:'◆ 从 Marketplace 链接导入', lblScrapeHint:'自动提取 名称/价格/简介/图片链接（不下载）',
     promptScrapeUrl:'粘贴 Facebook Marketplace 商品链接（自动提取图片链接/价格/简介）：',
@@ -2641,12 +2794,13 @@ const I18N = {
     lblGitUser:'GitHub username', lblGitToken:'GitHub Token (PAT)', btnSaveGitAuth:'Save GitHub credentials',
     gitCredNeedBoth:'Fill in both the GitHub username and a Token (used for push, never echoed)', gitCredSaving:'Saving credentials…',
     gitCredOk:'Credentials saved ·', gitCredFail:'Failed to save credentials: ',
-    legendFbLogin:'Facebook login (fetch full photo carousel)',
-    lblFbLoginHint:'Without logging in, only one cover photo can be scraped. Log in once and imports will render the listing with a real session to grab all photos.',
+    legendFbLogin:'Facebook login (fetch full photo carousel + price)',
+    lblFbLoginHint:'Without logging in, only one cover photo can be scraped and price is often missed too. Log in once and imports will render the listing with a real session to grab all photos and the price.',
     btnFbLogin:'Log in to Facebook',
     fbLoginUnavailable:'playwright not installed, this feature is unavailable', fbLoginRunning:'Login window is open, log in and close it…',
     fbLoginOk:'Logged in ✓', fbLoginNone:'Not logged in yet', fbLoginUnknown:'Failed to read login status', fbLoginFail:'Failed to open login window: ',
     searchPlaceholder:'Search items (name/desc/link)…', countItems:'{n} items', matchItems:' · {n} shown',
+    uploadStats:'· {total} uploaded all-time · {last12h} in the last 12h · ${earnings} earned',
     rowEdit:'Edit', rowDel:'Del', btnAdd:'＋ Add Item', openLink:'Open',
     btnScrape:'◆ Import from Marketplace link', lblScrapeHint:'Auto-fills name/price/description/image links (kept as links, not downloaded)',
     promptScrapeUrl:'Paste a Facebook Marketplace item link (extracts image links/price/description):',
@@ -2679,6 +2833,7 @@ function toggleLang() {
 
 applyLang();
 renderRows();
+loadStats();
 </script>
 </body>
 </html>
