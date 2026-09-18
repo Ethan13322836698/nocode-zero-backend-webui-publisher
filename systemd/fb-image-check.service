@@ -1,0 +1,12 @@
+[Unit]
+Description=Facebook CDN image link self-healer (single pass)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO_DIR__
+ExecStart=__PYTHON__ __REPO_DIR__/check_fb_images.py
+SyslogIdentifier=fb-image-check
+RuntimeDirectory=fb-image-check
+TimeoutStartSec=540

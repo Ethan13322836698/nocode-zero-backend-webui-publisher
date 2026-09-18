@@ -5,6 +5,8 @@ Zero-backend static store: local WebUI edits products, every save rewrites `inde
 ## Everything lives in server.py
 The whole app is one ~1850-line stdlib-only Python file: HTTP server, JSON API handlers, and the public/index + admin + setup pages as `INDEX_TEMPLATE` / `ADMIN_TEMPLATE` / `SETUP_TEMPLATE` string constants. Editing the admin UI means editing those template strings inside `server.py` (inline CSS and JS), not separate files.
 
+**Deliberate exception**: `check_fb_images.py` + `setup_fb_image_checker.py` (+ `systemd/`) are separate files. They don't run inside the admin server process — they're deployed to a dedicated always-on box (Raspberry Pi / Oracle server) as a systemd timer that periodically re-scrapes and patches expired Facebook CDN image links, importing `server.py` for its data/scrape/publish functions rather than duplicating them.
+
 ## Commands
 - Run: `bash run.sh` → `http://127.0.0.1:8000/admin` (default port `8000`, override via env `BWMARKET_PORT`). Prefers `.venv/bin/python3` if present, else falls back to system `python3`/`python`.
 - No tests, no linter, no Makefile, no package.json. Verification limited to: `python3 -m py_compile server.py`
