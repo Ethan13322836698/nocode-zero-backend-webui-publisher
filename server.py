@@ -1480,6 +1480,57 @@ def start_todo_scan():
     return True
 
 
+_todo_uploads = {}  # 商品ID -> {"state": "running"|"error", "msg": str}
+_todo_save_lock = threading.Lock()  # 上传逐个串行: 抓取后读-改-写 products.json 不能交错
+
+
+def _upload_todo_item(item_id):
+    """抓取单个商品并按后台「新增商品」同样的流程保存(置顶 → verify_images → 写
+    products.json + index.html → 记录新增 → 自动发布)。成功后商品进了本地文件,
+    清单里下一次轮询自然消失; 失败则记下原因供页面显示并可重试。"""
+    try:
+        with _todo_save_lock:
+            url = "https://www.facebook.com/marketplace/item/%s/" % item_id
+            data = scrape_marketplace(url)
+            if not data.get("ok"):
+                raise ValueError(data.get("error") or "提取失败")
+            if not data.get("name"):
+                raise ValueError("没有提取到商品名称")
+            if not data.get("imgs"):
+                raise ValueError("没有提取到图片")
+            old_products = load_products()
+            if find_existing_product_by_fb_item(item_id):
+                return  # 期间已被手动添加
+            item = {
+                "name": data["name"], "price": data.get("price") or "", "sym": data.get("sym") or "",
+                "desc": data.get("desc") or "", "buy": data["buy"], "buy_text": "",
+                "imgs": data["imgs"], "img": data["imgs"][0],
+            }
+            products = verify_images([item] + old_products)
+            save_products(products)
+            record_new_uploads(count_new_products(old_products, products))
+            with open(INDEX_FILE, "w", encoding="utf-8") as f:
+                f.write(render_index(products))
+            start_save_publish("products update")
+        with _todo_lock:
+            _todo_uploads.pop(item_id, None)
+    except Exception as e:
+        with _todo_lock:
+            _todo_uploads[item_id] = {"state": "error", "msg": str(e)}
+
+
+def start_todo_upload(item_id):
+    """后台线程上传一个商品; 该商品正在上传则不重复启动。"""
+    if not re.fullmatch(r"\d+", item_id or ""):
+        return False
+    with _todo_lock:
+        if _todo_uploads.get(item_id, {}).get("state") == "running":
+            return False
+        _todo_uploads[item_id] = {"state": "running", "msg": ""}
+    threading.Thread(target=_upload_todo_item, args=(item_id,), daemon=True).start()
+    return True
+
+
 def todo_snapshot():
     """卖家商品 减去 本地 products.json 里已有的(按 FB 商品 ID), 每次请求实时计算,
     所以商品一保存进本地文件, 下一次轮询就会从清单里消失。"""
@@ -1488,6 +1539,8 @@ def todo_snapshot():
         st = dict(_todo_state)
     st["items"] = [it for it in st.pop("seller") if it["id"] not in have]
     st["total_seller"] = len(_todo_state["seller"])
+    with _todo_lock:
+        st["uploads"] = {k: dict(v) for k, v in _todo_uploads.items()}
     return st
 
 
@@ -1614,6 +1667,12 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_fb_login()
         elif path == "/api/todo/scan":
             self._json(200, {"ok": True, "started": start_todo_scan()})
+        elif path == "/api/todo/upload":
+            try:
+                body = json.loads(self._read_body().decode("utf-8") or "{}")
+            except Exception:
+                body = {}
+            self._json(200, {"ok": True, "started": start_todo_upload(str(body.get("id") or ""))})
         else:
             self._send(404, "<h1>404</h1>")
 
@@ -2131,8 +2190,11 @@ h1 { font-size: 20px; margin: 0; }
 button { font: inherit; border: 1px solid #111; background: #fff; padding: 4px 12px; cursor: pointer; }
 button:disabled { opacity: .5; cursor: default; }
 ul { list-style: none; padding: 0; margin: 0; }
-li { display: flex; gap: 12px; align-items: center; padding: 12px 4px; border-bottom: 1px solid #ddd; cursor: pointer; }
+li { display: flex; gap: 12px; align-items: center; padding: 12px 4px; border-bottom: 1px solid #ddd; }
 li:hover { background: #f4f4f4; }
+li button { padding: 2px 10px; white-space: nowrap; }
+li .st { font-size: 12px; color: #666; }
+li .st.bad { color: #b00020; }
 li .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 li .id { color: #888; font-size: 12px; font-variant-numeric: tabular-nums; }
 li .badge { font-size: 12px; background: #111; color: #fff; padding: 1px 8px; }
@@ -2159,10 +2221,10 @@ li .badge { font-size: 12px; background: #111; color: #fff; padding: 1px 8px; }
 const I18N = {
   zh: { title: '待添加商品', rescan: '重新扫描', langBtn: 'EN', empty: '全部都已添加 🎉',
         scanning: '扫描中…', count: '还有 {n} 个未添加(卖家共 {t} 个)', last: '上次扫描 ',
-        copied: '已复制', hint: '点击复制链接', pageTitle: '待添加商品' },
+        copied: '已复制', copy: '复制链接', upload: '上传', uploading: '上传中…', retry: '重试', pageTitle: '待添加商品' },
   en: { title: 'To add', rescan: 'Rescan', langBtn: '中文', empty: 'All caught up 🎉',
         scanning: 'Scanning…', count: '{n} missing (seller has {t})', last: 'Last scan ',
-        copied: 'Copied', hint: 'Click to copy link', pageTitle: 'To add' }
+        copied: 'Copied', copy: 'Copy link', upload: 'Upload', uploading: 'Uploading…', retry: 'Retry', pageTitle: 'To add' }
 };
 let LANG = localStorage.getItem('bw_admin_lang') || 'zh';
 let DATA = null;
@@ -2181,7 +2243,11 @@ function copyText(text) {
   document.execCommand('copy'); ta.remove();
   return Promise.resolve();
 }
-function pick(id) {
+async function upload(id) {
+  try { await fetch('/api/todo/upload', { method: 'POST', body: JSON.stringify({ id: id }) }); } catch (e) {}
+  poll();
+}
+function copyItem(id) {
   const it = (DATA.items || []).find(x => x.id === id);
   if (!it) return;
   copyText(it.url).then(() => { COPIED.add(id); render(); });
@@ -2200,11 +2266,20 @@ function render() {
   const err = document.getElementById('err');
   err.style.display = DATA.error ? '' : 'none';
   err.textContent = DATA.error || '';
-  document.getElementById('list').innerHTML = items.map(it =>
-    '<li title="' + esc(L.hint) + '" onclick="pick(\\'' + esc(it.id) + '\\')">' +
+  const ups = DATA.uploads || {};
+  document.getElementById('list').innerHTML = items.map(it => {
+    const u = ups[it.id] || {};
+    const busy = u.state === 'running';
+    return '<li>' +
       '<span class="t">' + esc(it.title || it.url) + '</span>' +
       (COPIED.has(it.id) ? '<span class="badge">' + esc(L.copied) + '</span>' : '') +
-      '<span class="id">' + esc(it.id) + '</span></li>').join('');
+      (busy ? '<span class="st">' + esc(L.uploading) + '</span>' : '') +
+      (u.state === 'error' ? '<span class="st bad" title="' + esc(u.msg) + '">' + esc(u.msg) + '</span>' : '') +
+      '<span class="id">' + esc(it.id) + '</span>' +
+      '<button onclick="copyItem(\\'' + esc(it.id) + '\\')">' + esc(L.copy) + '</button>' +
+      '<button ' + (busy ? 'disabled ' : '') + 'onclick="upload(\\'' + esc(it.id) + '\\')">' +
+        esc(u.state === 'error' ? L.retry : L.upload) + '</button></li>';
+  }).join('');
   document.getElementById('empty').style.display =
     (!items.length && DATA.scanned_at && !DATA.running && !DATA.error) ? '' : 'none';
 }
