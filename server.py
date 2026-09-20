@@ -1300,6 +1300,60 @@ def render_index(products):
 
 
 # ------------------------- HTTP 服务 -------------------------
+# ------------------------- 预览时同步远端图片 -------------------------
+_sync_lock = threading.Lock()
+_sync_last = 0.0
+SYNC_INTERVAL = 60  # 秒: 预览页刷新时最多每分钟拉取一次远端
+
+
+def sync_images_from_remote(force=False):
+    """打开预览时, 从 origin/main 的 products.json 同步图片 URL(check_fb_images 会在
+    远端刷新过期的 Facebook 图片链接)。只按商品标识匹配, 只改 imgs/img, 且只覆盖
+    本地全为外链图片的商品(不动本地上传图); 只写本地文件, 不 commit / push。
+    返回更新的商品数。"""
+    global _sync_last
+    if not _sync_lock.acquire(blocking=False):
+        return 0
+    try:
+        now = time.time()
+        if not force and now - _sync_last < SYNC_INTERVAL:
+            return 0
+        _sync_last = now
+        branch = load_git().get("branch") or "main"
+        remote = "origin"
+        ok, _ = run_git(["fetch", remote, branch], timeout=20)
+        if not ok:
+            return 0
+        ok, out = run_git(["show", "%s/%s:%s" % (remote, branch, os.path.basename(DATA_FILE))])
+        if not ok:
+            return 0
+        remote_products = json.loads(out)
+        if not isinstance(remote_products, list):
+            return 0
+        remote_by_id = {_product_identity(p): p for p in remote_products if isinstance(p, dict)}
+        products = load_products()
+        changed = 0
+        for p in products:
+            r = remote_by_id.get(_product_identity(p))
+            if not r:
+                continue
+            local_imgs, remote_imgs = product_imgs(p), product_imgs(r)
+            if not remote_imgs or local_imgs == remote_imgs:
+                continue
+            if not all(is_external_img(im) for im in local_imgs):
+                continue
+            p["imgs"] = list(remote_imgs)
+            p["img"] = remote_imgs[0]
+            changed += 1
+        if changed:
+            save_products(products)
+        return changed
+    except Exception:
+        return 0
+    finally:
+        _sync_lock.release()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -1338,6 +1392,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.unquote(parsed.path)
 
         if path in ("/", "/index.html"):
+            sync_images_from_remote()
             self._send(200, render_index(load_products()))
         elif path == "/setup":
             self._send(200, self.setup_page())
