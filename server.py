@@ -1354,6 +1354,143 @@ def sync_images_from_remote(force=False):
         _sync_lock.release()
 
 
+DEFAULT_SELLER_URL = "https://www.facebook.com/marketplace/profile/100031022612345/"
+TODO_RESCAN_SECONDS = 600  # 打开 /todo 时, 上次扫描超过这么久就自动重扫
+
+_SELLER_ITEMS_JS = """
+els => els.map(a => {
+  const img = a.querySelector('img');
+  const txt = (a.innerText || '').split('\\n').map(t => t.trim()).filter(Boolean);
+  return { href: a.href, title: (img && img.alt) || txt[txt.length - 1] || '' };
+})
+"""
+
+# 卖家主页在 Facebook 里是浮在 Marketplace 首页上的弹窗(role=dialog); 弹窗背后的首页
+# 推荐流是别的卖家的商品, 必须只读弹窗里的链接。弹窗内部有自己的滚动容器, 且列表是
+# 虚拟滚动(滚出视野的商品会被移出 DOM), 所以要边滚边收集, 不能滚到底再一次性读。
+_SELLER_DIALOG_JS = """
+() => {
+  const d = [...document.querySelectorAll('[role=dialog]')]
+    .find(d => d.querySelector("a[href*='/marketplace/item/']"));
+  if (!d) return null;
+  let sc = null;
+  for (const e of d.querySelectorAll('*')) {
+    if (e.scrollHeight > e.clientHeight + 20 && ['auto', 'scroll'].includes(getComputedStyle(e).overflowY)) sc = e;
+  }
+  return sc ? { top: sc.scrollTop, h: sc.scrollHeight, view: sc.clientHeight } : { top: 0, h: 0, view: 0 };
+}
+"""
+
+_SELLER_SCROLL_JS = """
+() => {
+  const d = [...document.querySelectorAll('[role=dialog]')]
+    .find(d => d.querySelector("a[href*='/marketplace/item/']"));
+  if (!d) return;
+  let sc = null;
+  for (const e of d.querySelectorAll('*')) {
+    if (e.scrollHeight > e.clientHeight + 20 && ['auto', 'scroll'].includes(getComputedStyle(e).overflowY)) sc = e;
+  }
+  if (sc) sc.scrollTop = sc.scrollTop + sc.clientHeight * 0.7;
+}
+"""
+
+_SELLER_LINKS_JS = """
+sel => {
+  const d = [...document.querySelectorAll('[role=dialog]')]
+    .find(d => d.querySelector("a[href*='/marketplace/item/']"));
+  if (!d) return [];
+  return [...d.querySelectorAll("a[href*='/marketplace/item/']")].map(a => {
+    const img = a.querySelector('img');
+    const txt = (a.innerText || '').split('\\n').map(t => t.trim()).filter(Boolean);
+    return { href: a.href, title: (img && img.alt) || txt[txt.length - 1] || '' };
+  });
+}
+"""
+
+
+def browser_extract_seller_items(url, max_scrolls=150, timeout_ms=30000):
+    """用已登录的持久化浏览器打开卖家主页(弹窗), 边滚动边收集弹窗内的商品链接, 滚到底为止,
+    返回 ([{id, url, title}], 错误信息)。未安装 playwright / 未登录时返回 (None, 原因)。"""
+    sync_playwright = _playwright_sync()
+    if not sync_playwright:
+        return None, "未安装 playwright"
+    if not os.path.isdir(FB_PROFILE_DIR) or not os.listdir(FB_PROFILE_DIR):
+        return None, "未登录 Facebook, 请先在后台设置里点「登录 Facebook」"
+    found = {}
+    try:
+        with sync_playwright() as p:
+            ctx = p.chromium.launch_persistent_context(
+                FB_PROFILE_DIR, headless=True, viewport={"width": 1400, "height": 1000})
+            try:
+                page = ctx.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                try:
+                    page.wait_for_selector("[role=dialog] a[href*='/marketplace/item/']", timeout=15000)
+                except Exception:
+                    pass
+                stuck = 0
+                for _ in range(max_scrolls):
+                    for r in page.evaluate(_SELLER_LINKS_JS, None) or []:
+                        item_id = _fb_item_id(r.get("href"))
+                        if item_id and item_id not in found:
+                            found[item_id] = {
+                                "id": item_id,
+                                "url": "https://www.facebook.com/marketplace/item/%s/" % item_id,
+                                "title": (r.get("title") or "").strip(),
+                            }
+                    pos = page.evaluate(_SELLER_DIALOG_JS)
+                    if not pos:
+                        break
+                    at_end = pos["top"] + pos["view"] >= pos["h"] - 5
+                    page.evaluate(_SELLER_SCROLL_JS)
+                    page.wait_for_timeout(1200)
+                    # 到底后再多等几轮, 给懒加载留时间; 连续没长高才算真的到底
+                    new = page.evaluate(_SELLER_DIALOG_JS) or pos
+                    stuck = stuck + 1 if (at_end and new["h"] <= pos["h"]) else 0
+                    if stuck >= 3:
+                        break
+            finally:
+                ctx.close()
+    except Exception as e:
+        if not found:
+            return None, str(e)
+    if not found:
+        return None, "没有读到任何商品(可能未登录或页面结构变化)"
+    return list(found.values()), None
+
+
+_todo_state = {"running": False, "scanned_at": 0, "error": None, "seller": []}
+_todo_lock = threading.Lock()
+
+
+def start_todo_scan():
+    """后台线程扫描卖家主页, 立即返回; 已有扫描在跑则不重复启动。"""
+    with _todo_lock:
+        if _todo_state["running"]:
+            return False
+        _todo_state["running"] = True
+    def _run():
+        url = load_site().get("seller_url") or DEFAULT_SELLER_URL
+        items, err = browser_extract_seller_items(url)
+        with _todo_lock:
+            if items is not None:
+                _todo_state["seller"] = items
+            _todo_state.update(running=False, error=err, scanned_at=int(time.time()))
+    threading.Thread(target=_run, daemon=True).start()
+    return True
+
+
+def todo_snapshot():
+    """卖家商品 减去 本地 products.json 里已有的(按 FB 商品 ID), 每次请求实时计算,
+    所以商品一保存进本地文件, 下一次轮询就会从清单里消失。"""
+    have = {_fb_item_id(p.get("buy")) for p in load_products() if isinstance(p, dict)}
+    with _todo_lock:
+        st = dict(_todo_state)
+    st["items"] = [it for it in st.pop("seller") if it["id"] not in have]
+    st["total_seller"] = len(_todo_state["seller"])
+    return st
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -1394,6 +1531,14 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             sync_images_from_remote()
             self._send(200, render_index(load_products()))
+        elif path == "/todo":
+            with _todo_lock:
+                stale = time.time() - _todo_state["scanned_at"] > TODO_RESCAN_SECONDS
+            if stale:
+                start_todo_scan()
+            self._send(200, TODO_TEMPLATE)
+        elif path == "/api/todo":
+            self._json(200, dict(todo_snapshot(), ok=True))
         elif path == "/setup":
             self._send(200, self.setup_page())
         elif path == "/admin":
@@ -1467,6 +1612,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_scrape_marketplace()
         elif path == "/api/fb/login":
             self._handle_fb_login()
+        elif path == "/api/todo/scan":
+            self._json(200, {"ok": True, "started": start_todo_scan()})
         else:
             self._send(404, "<h1>404</h1>")
 
@@ -1964,6 +2111,114 @@ const CURRENCY = "/*__CURRENCY__*/";
     else if (e.key === 'ArrowRight') goGallery(gCur + 1);
   });
 })();
+</script>
+</body>
+</html>
+'''
+
+TODO_TEMPLATE = '''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>待添加商品</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 760px; margin: 0 auto; padding: 20px; color: #111; background: #fff; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; border-bottom: 1px solid #111; padding-bottom: 12px; }
+h1 { font-size: 20px; margin: 0; }
+.meta { color: #666; font-size: 13px; flex: 1; }
+button { font: inherit; border: 1px solid #111; background: #fff; padding: 4px 12px; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+ul { list-style: none; padding: 0; margin: 0; }
+li { display: flex; gap: 12px; align-items: center; padding: 12px 4px; border-bottom: 1px solid #ddd; cursor: pointer; }
+li:hover { background: #f4f4f4; }
+li .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+li .id { color: #888; font-size: 12px; font-variant-numeric: tabular-nums; }
+li .badge { font-size: 12px; background: #111; color: #fff; padding: 1px 8px; }
+.msg { padding: 24px 4px; color: #666; }
+.err { color: #b00020; }
+@media (prefers-color-scheme: dark) {
+  body { background: #111; color: #eee; } header { border-color: #eee; }
+  button { background: #111; color: #eee; border-color: #eee; }
+  li { border-color: #333; } li:hover { background: #1c1c1c; } li .badge { background: #eee; color: #111; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1 data-i18n="title">待添加商品</h1>
+  <span class="meta" id="meta"></span>
+  <button id="scanBtn" onclick="rescan()" data-i18n="rescan">重新扫描</button>
+  <button onclick="toggleLang()" data-i18n="langBtn">EN</button>
+</header>
+<div id="err" class="msg err" style="display:none"></div>
+<ul id="list"></ul>
+<div id="empty" class="msg" style="display:none" data-i18n="empty">全部都已添加 🎉</div>
+<script>
+const I18N = {
+  zh: { title: '待添加商品', rescan: '重新扫描', langBtn: 'EN', empty: '全部都已添加 🎉',
+        scanning: '扫描中…', count: '还有 {n} 个未添加(卖家共 {t} 个)', last: '上次扫描 ',
+        copied: '已复制', hint: '点击复制链接' },
+  en: { title: 'To add', rescan: 'Rescan', langBtn: '中文', empty: 'All caught up 🎉',
+        scanning: 'Scanning…', count: '{n} missing (seller has {t})', last: 'Last scan ',
+        copied: 'Copied', hint: 'Click to copy link' }
+};
+let LANG = localStorage.getItem('bw_admin_lang') || 'zh';
+let DATA = null;
+const COPIED = new Set();
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function applyLang() {
+  document.querySelectorAll('[data-i18n]').forEach(e => { e.textContent = I18N[LANG][e.dataset.i18n]; });
+  render();
+}
+function toggleLang() { LANG = LANG === 'zh' ? 'en' : 'zh'; localStorage.setItem('bw_admin_lang', LANG); applyLang(); }
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+  const ta = document.createElement('textarea');
+  ta.value = text; document.body.appendChild(ta); ta.select();
+  document.execCommand('copy'); ta.remove();
+  return Promise.resolve();
+}
+function pick(id) {
+  const it = (DATA.items || []).find(x => x.id === id);
+  if (!it) return;
+  copyText(it.url).then(() => { COPIED.add(id); render(); });
+}
+function render() {
+  if (!DATA) return;
+  const L = I18N[LANG];
+  const items = DATA.items || [];
+  document.getElementById('scanBtn').disabled = DATA.running;
+  let meta = DATA.running ? L.scanning : '';
+  if (!DATA.running && DATA.scanned_at) {
+    meta = L.count.replace('{n}', items.length).replace('{t}', DATA.total_seller) +
+      ' · ' + L.last + new Date(DATA.scanned_at * 1000).toLocaleTimeString();
+  }
+  document.getElementById('meta').textContent = meta;
+  const err = document.getElementById('err');
+  err.style.display = DATA.error ? '' : 'none';
+  err.textContent = DATA.error || '';
+  document.getElementById('list').innerHTML = items.map(it =>
+    '<li title="' + esc(L.hint) + '" onclick="pick(\\'' + esc(it.id) + '\\')">' +
+      '<span class="t">' + esc(it.title || it.url) + '</span>' +
+      (COPIED.has(it.id) ? '<span class="badge">' + esc(L.copied) + '</span>' : '') +
+      '<span class="id">' + esc(it.id) + '</span></li>').join('');
+  document.getElementById('empty').style.display =
+    (!items.length && DATA.scanned_at && !DATA.running && !DATA.error) ? '' : 'none';
+}
+async function poll() {
+  try {
+    const j = await (await fetch('/api/todo')).json();
+    if (j.ok) { DATA = j; render(); }
+  } catch (e) {}
+}
+async function rescan() {
+  try { await fetch('/api/todo/scan', { method: 'POST', body: '{}' }); } catch (e) {}
+  poll();
+}
+applyLang();
+poll();
+setInterval(poll, 3000);
 </script>
 </body>
 </html>
