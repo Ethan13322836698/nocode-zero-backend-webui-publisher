@@ -367,6 +367,95 @@ def fb_cookie():
     return _normalize_cookie(raw)
 
 
+def _merge_products(base, ours, theirs):
+    """按商品标识做三方合并 products.json(远端另有人/定时任务也在改它时用)。
+    某条只有一边改过就取改过的那边; 两边都改过取本地(ours), 但若本地没动过图片而远端
+    动了(fb-image-check 刷新过期链接), 图片取远端; 一边删除且另一边没改 → 删除;
+    只在远端新增的追加到末尾。顺序以本地为准。"""
+    def by_id(lst):
+        return {_product_identity(p): p for p in lst if isinstance(p, dict)}
+    b, o, t = by_id(base), by_id(ours), by_id(theirs)
+    out = []
+    for p in ours:
+        k = _product_identity(p)
+        tp, bp = t.get(k), b.get(k)
+        if tp is None:
+            # 远端没有: 本地新增(不在 base)保留; base 里有而远端删了 → 本地没改才跟着删
+            if bp is None or p != bp:
+                out.append(p)
+            continue
+        if bp is None or p == bp:
+            out.append(tp)
+        elif tp == bp:
+            out.append(p)
+        else:
+            m = dict(p)
+            if product_imgs(p) == product_imgs(bp) and product_imgs(tp) != product_imgs(bp):
+                m["imgs"] = tp.get("imgs")
+                m["img"] = tp.get("img")
+            out.append(m)
+    for p in theirs:
+        k = _product_identity(p)
+        if k not in o and k not in b:
+            out.append(p)
+    return out
+
+
+def _git_show_json(ref):
+    ok, out = run_git(["show", ref])
+    try:
+        v = json.loads(out) if ok else []
+    except Exception:
+        v = []
+    return v if isinstance(v, list) else []
+
+
+def _merge_remote(remote, branch):
+    """把远端分支合进本地: 先走 git 自动合并; products.json / index.html 冲突时按商品
+    三方合并 + 重新渲染 index.html; 其它文件冲突则中止合并并报错(不丢数据)。返回 (ok, 说明)。"""
+    ok, out = run_git(["merge", "--no-edit", "%s/%s" % (remote, branch)], timeout=60)
+    if ok:
+        return True, "已合并远端更新"
+    ok, files = run_git(["diff", "--name-only", "--diff-filter=U"])
+    conflicted = set(files.split()) if ok else set()
+    if not conflicted or not conflicted <= {"products.json", "index.html"}:
+        run_git(["merge", "--abort"])
+        return False, "与远端合并冲突, 需要手动处理: " + out[-300:]
+    if "products.json" in conflicted:
+        merged = _merge_products(
+            _git_show_json(":1:products.json"), _git_show_json(":2:products.json"),
+            _git_show_json(":3:products.json"))
+    else:
+        merged = load_products()
+    save_products(merged)
+    with open(INDEX_FILE, "w", encoding="utf-8") as f:
+        f.write(render_index(merged))
+    run_git(["add", "products.json", "index.html"])
+    ok, out = run_git(["commit", "--no-edit"])
+    if not ok:
+        run_git(["merge", "--abort"])
+        return False, "合并提交失败: " + out
+    return True, "已合并远端更新(自动解决 products.json 冲突)"
+
+
+def _push_with_sync(branch, tries=3):
+    """push; 被拒(远端有别人先推了)就 fetch + 合并 + 重试。返回 (ok, 说明)。"""
+    out = ""
+    for _ in range(tries):
+        ok, out = run_git(["push", "origin", branch], timeout=60)
+        if ok:
+            return True, ""
+        if not any(k in out for k in ("rejected", "fetch first", "non-fast-forward")):
+            return False, out
+        ok, msg = run_git(["fetch", "origin", branch], timeout=60)
+        if not ok:
+            return False, "fetch 失败: " + msg
+        ok, msg = _merge_remote("origin", branch)
+        if not ok:
+            return False, msg
+    return False, out
+
+
 # ------------------------- 自动 Git 发布 -------------------------
 def run_git(args, timeout=30):
     """执行 git 命令, 返回 (ok, output)"""
@@ -419,7 +508,14 @@ def git_commit_push(message, manual=False):
     if not ok:
         return False, "git status 失败: " + changed
     if not changed.strip():
-        return False, "没有任何改动, 已跳过提交"
+        # 没有新改动, 但之前可能有 push 失败遗留的未推送提交: 有就补推, 没有才跳过
+        ok, ahead = run_git(["rev-list", "--count", "origin/%s..HEAD" % g.get("branch", "main")])
+        if not (g.get("push", True) or manual) or not ok or ahead.strip() in ("", "0"):
+            return False, "没有任何改动, 已跳过提交"
+        ok, out = _push_with_sync(g.get("branch", "main"))
+        if not ok:
+            return False, "push 失败: " + out
+        return True, "已补推之前未推送的提交: " + message
 
     # 3) commit
     prefix = g.get("commit_prefix", "")
@@ -444,7 +540,7 @@ def git_commit_push(message, manual=False):
             ok, out = run_git(["remote", "get-url", "origin"])
             if not ok or (ok and out.strip() != remote_url.strip()):
                 run_git(["remote", "set-url", "origin", remote_url.strip()])
-        ok, out = run_git(["push", "origin", branch])
+        ok, out = _push_with_sync(branch)
         if not ok:
             return False, "commit 成功但 push 失败: " + out
         return True, "已 commit + push: " + message
