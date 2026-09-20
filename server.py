@@ -1627,6 +1627,48 @@ def start_todo_upload(item_id):
     return True
 
 
+TODO_AUTO_DELAY = 20  # 秒: 自动添加时两个商品之间的间隔(避免 Facebook 限流 / 刷屏式提交)
+_todo_auto = {"on": False, "current": None}  # 仅内存: 重启服务后回到关闭, 不会悄悄接着往线上发
+_todo_auto_stop = None
+
+
+def _todo_auto_loop(stop):
+    """自动添加: 永远取清单最上面的商品上传, 传完再取下一个; 清单空了就定期重扫等新商品。
+    上传失败的商品本轮跳过(页面上显示原因, 可手动重试), 不会卡在同一个商品上死循环。"""
+    while not stop.is_set():
+        with _todo_lock:
+            stale = time.time() - _todo_state["scanned_at"] > TODO_RESCAN_SECONDS
+        if stale:
+            start_todo_scan()
+        snap = todo_snapshot()
+        todo = [it for it in snap["items"]
+                if snap["uploads"].get(it["id"], {}).get("state") != "error"]
+        if not todo:
+            stop.wait(10)
+            continue
+        item_id = todo[0]["id"]
+        with _todo_lock:
+            _todo_auto["current"] = item_id
+            _todo_uploads[item_id] = {"state": "running", "msg": ""}
+        _upload_todo_item(item_id)
+        with _todo_lock:
+            _todo_auto["current"] = None
+        stop.wait(TODO_AUTO_DELAY)
+
+
+def set_todo_auto(on):
+    """开/关自动添加(幂等)。"""
+    global _todo_auto_stop
+    with _todo_lock:
+        if on and not _todo_auto["on"]:
+            _todo_auto["on"] = True
+            _todo_auto_stop = threading.Event()
+            threading.Thread(target=_todo_auto_loop, args=(_todo_auto_stop,), daemon=True).start()
+        elif not on and _todo_auto["on"]:
+            _todo_auto["on"] = False
+            _todo_auto_stop.set()
+
+
 def todo_snapshot():
     """卖家商品 减去 本地 products.json 里已有的(按 FB 商品 ID), 每次请求实时计算,
     所以商品一保存进本地文件, 下一次轮询就会从清单里消失。"""
@@ -1637,6 +1679,7 @@ def todo_snapshot():
     st["total_seller"] = len(_todo_state["seller"])
     with _todo_lock:
         st["uploads"] = {k: dict(v) for k, v in _todo_uploads.items()}
+        st["auto"] = dict(_todo_auto)
     return st
 
 
@@ -1763,6 +1806,13 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_fb_login()
         elif path == "/api/todo/scan":
             self._json(200, {"ok": True, "started": start_todo_scan()})
+        elif path == "/api/todo/auto":
+            try:
+                body = json.loads(self._read_body().decode("utf-8") or "{}")
+            except Exception:
+                body = {}
+            set_todo_auto(bool(body.get("on")))
+            self._json(200, {"ok": True, "on": _todo_auto["on"]})
         elif path == "/api/todo/upload":
             try:
                 body = json.loads(self._read_body().decode("utf-8") or "{}")
@@ -2307,6 +2357,7 @@ li .badge { font-size: 12px; background: #111; color: #fff; padding: 1px 8px; }
 <header>
   <h1 data-i18n="title">待添加商品</h1>
   <span class="meta" id="meta"></span>
+  <button id="autoBtn" onclick="toggleAuto()"></button>
   <button id="scanBtn" onclick="rescan()" data-i18n="rescan">重新扫描</button>
   <button onclick="toggleLang()" data-i18n="langBtn">EN</button>
 </header>
@@ -2317,10 +2368,12 @@ li .badge { font-size: 12px; background: #111; color: #fff; padding: 1px 8px; }
 const I18N = {
   zh: { title: '待添加商品', rescan: '重新扫描', langBtn: 'EN', empty: '全部都已添加 🎉',
         scanning: '扫描中…', count: '还有 {n} 个未添加(卖家共 {t} 个)', last: '上次扫描 ',
-        copied: '已复制', copy: '复制链接', upload: '上传', uploading: '上传中…', retry: '重试', pageTitle: '待添加商品' },
+        copied: '已复制', copy: '复制链接', upload: '上传', uploading: '上传中…', retry: '重试', pageTitle: '待添加商品', autoOff: '自动添加：关', autoOn: '自动添加：开(点击停止)',
+        autoConfirm: '开启后会从最上面开始逐个抓取并直接发布到线上商店，一直进行到你关闭为止。确定开启？' },
   en: { title: 'To add', rescan: 'Rescan', langBtn: '中文', empty: 'All caught up 🎉',
         scanning: 'Scanning…', count: '{n} missing (seller has {t})', last: 'Last scan ',
-        copied: 'Copied', copy: 'Copy link', upload: 'Upload', uploading: 'Uploading…', retry: 'Retry', pageTitle: 'To add' }
+        copied: 'Copied', copy: 'Copy link', upload: 'Upload', uploading: 'Uploading…', retry: 'Retry', pageTitle: 'To add', autoOff: 'Auto-add: off', autoOn: 'Auto-add: ON (click to stop)',
+        autoConfirm: 'This uploads the top item, then the next, and so on, publishing each straight to the live store until you turn it off. Turn on?' }
 };
 let LANG = localStorage.getItem('bw_admin_lang') || 'zh';
 let DATA = null;
@@ -2339,6 +2392,12 @@ function copyText(text) {
   document.execCommand('copy'); ta.remove();
   return Promise.resolve();
 }
+async function toggleAuto() {
+  const on = !(DATA && DATA.auto && DATA.auto.on);
+  if (on && !confirm(I18N[LANG].autoConfirm)) return;
+  try { await fetch('/api/todo/auto', { method: 'POST', body: JSON.stringify({ on: on }) }); } catch (e) {}
+  poll();
+}
 async function upload(id) {
   try { await fetch('/api/todo/upload', { method: 'POST', body: JSON.stringify({ id: id }) }); } catch (e) {}
   poll();
@@ -2353,6 +2412,11 @@ function render() {
   const L = I18N[LANG];
   const items = DATA.items || [];
   document.getElementById('scanBtn').disabled = DATA.running;
+  const autoOn = !!(DATA.auto && DATA.auto.on);
+  const ab = document.getElementById('autoBtn');
+  ab.textContent = autoOn ? L.autoOn : L.autoOff;
+  ab.style.background = autoOn ? '#111' : '';
+  ab.style.color = autoOn ? '#fff' : '';
   let meta = DATA.running ? L.scanning : '';
   if (!DATA.running && DATA.scanned_at) {
     meta = L.count.replace('{n}', items.length).replace('{t}', DATA.total_seller) +
