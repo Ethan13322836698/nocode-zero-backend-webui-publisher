@@ -1759,7 +1759,8 @@ class Handler(BaseHTTPRequestHandler):
             old_products = load_products()
             dup = find_new_duplicate_fb_listing(old_products, products)
             if dup:
-                self._json(409, {"ok": False, "error": "This Facebook Marketplace listing has already been added: \"%s\"" % dup})
+                self._json(409, {"ok": False, "code": "dup_listing", "name": dup,
+                                 "error": "This Facebook Marketplace listing has already been added: \"%s\"" % dup})
                 return
             products = verify_images(products)
             save_products(products)
@@ -2158,16 +2159,17 @@ li .badge { font-size: 12px; background: #111; color: #fff; padding: 1px 8px; }
 const I18N = {
   zh: { title: '待添加商品', rescan: '重新扫描', langBtn: 'EN', empty: '全部都已添加 🎉',
         scanning: '扫描中…', count: '还有 {n} 个未添加(卖家共 {t} 个)', last: '上次扫描 ',
-        copied: '已复制', hint: '点击复制链接' },
+        copied: '已复制', hint: '点击复制链接', pageTitle: '待添加商品' },
   en: { title: 'To add', rescan: 'Rescan', langBtn: '中文', empty: 'All caught up 🎉',
         scanning: 'Scanning…', count: '{n} missing (seller has {t})', last: 'Last scan ',
-        copied: 'Copied', hint: 'Click to copy link' }
+        copied: 'Copied', hint: 'Click to copy link', pageTitle: 'To add' }
 };
 let LANG = localStorage.getItem('bw_admin_lang') || 'zh';
 let DATA = null;
 const COPIED = new Set();
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function applyLang() {
+  document.title = I18N[LANG].pageTitle;
   document.querySelectorAll('[data-i18n]').forEach(e => { e.textContent = I18N[LANG][e.dataset.i18n]; });
   render();
 }
@@ -2563,7 +2565,7 @@ function resetForm() {
   document.getElementById('f_sym').value = '';
   document.getElementById('f_price').value = '';
   document.getElementById('f_desc').value = '';
-  document.getElementById('f_buy').value = 'https://www.facebook.com/marketplace/';
+  document.getElementById('f_buy').value = '';
   document.getElementById('f_buy_text').value = '';
   document.getElementById('f_file').value = '';
   formImgs = [];
@@ -2777,7 +2779,7 @@ async function save(ev) {
       body: JSON.stringify(PRODUCTS)
     });
     const j = await resp.json();
-    if (!j.ok) throw new Error(j.error || '保存失败');
+    if (!j.ok) throw new Error(apiErr(j, '保存失败'));
     setStatus(I18N[LANG].statusSaved.replace('{n}', j.count) + (j.git ? I18N[LANG].gitPublished : I18N[LANG].notPushed + (j.git_msg||'')), true);
     renderRows();
     hideForm();
@@ -2809,7 +2811,7 @@ async function saveList() {
       body: JSON.stringify(PRODUCTS)
     });
     const j = await resp.json();
-    if (!j.ok) throw new Error(j.error || '保存失败');
+    if (!j.ok) throw new Error(apiErr(j, '保存失败'));
     setStatus(I18N[LANG].statusSaved.replace('{n}', j.count) + (j.git ? I18N[LANG].gitPublished : I18N[LANG].notPushed + (j.git_msg||'')), true);
     renderRows();
     loadStats();
@@ -3051,6 +3053,7 @@ async function saveSettings(ev) {
 /* ============ 中英文切换 ============ */
 const I18N = {
   zh: {
+    pageTitle:'商品管理后台', dupListing:'这个 Facebook Marketplace 商品已经添加过了：「{name}」',
     title:'商品管理后台', preview:'预览首页 →', settings:'⚙ 网站设置', addItem:'＋ 新增商品',
     tip:'改动后自动重写 index.html。图片上传到 images/ 文件夹。',
     thImg:'图片', thName:'名称', thPrice:'价格', thDesc:'简介', thLink:'购买链接', thOp:'操作',
@@ -3085,6 +3088,7 @@ const I18N = {
     err:'出错：', addProductTitle:'新增商品'
   },
   en: {
+    pageTitle:'Product Admin', dupListing:'This Facebook Marketplace listing has already been added: "{name}"',
     title:'Item Admin', preview:'Preview →', settings:'⚙ Settings', addItem:'＋ Add Item',
     tip:'Every change rewrites index.html. Uploaded images go into images/.',
     thImg:'Image', thName:'Name', thPrice:'Price', thDesc:'Description', thLink:'Buy Link', thOp:'Actions',
@@ -3121,8 +3125,15 @@ const I18N = {
 };
 let LANG = localStorage.getItem('bw_admin_lang') || 'zh';
 
+// 服务端错误按当前界面语言显示: 带 code 的错误用 I18N 文案, 其它原样
+function apiErr(j, fallback) {
+  const d = I18N[LANG] || I18N.zh;
+  if (j && j.code === 'dup_listing' && d.dupListing) return d.dupListing.replace('{name}', j.name || '');
+  return (j && j.error) || fallback;
+}
 function applyLang() {
   const d = I18N[LANG] || I18N.zh;
+  if (d.pageTitle) document.title = d.pageTitle;
   document.querySelectorAll('[data-i18n]').forEach(el => {
     const k = el.getAttribute('data-i18n');
     if (d[k] != null) el.textContent = d[k];
