@@ -6,7 +6,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=__REPO_DIR__
-ExecStart=__PYTHON__ __REPO_DIR__/check_fb_images.py
+ExecStart=__PYTHON__ -u __REPO_DIR__/check_fb_images.py
 SyslogIdentifier=fb-image-check
 RuntimeDirectory=fb-image-check
-TimeoutStartSec=540
+# 大批图片同时过期时允许整轮完成；同一个 oneshot 不会被定时器重复启动。
+TimeoutStartSec=infinity

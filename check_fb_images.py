@@ -21,6 +21,7 @@ Linux/macOS。
 """
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -30,6 +31,7 @@ import urllib.error
 import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -41,7 +43,7 @@ PHOTO_ID_RE = re.compile(r"/(\d+)_\d+_[a-z0-9_]*\.(?:jpg|jpeg|png|webp)", re.I)
 OE_PARAM_RE = re.compile(r"[?&]oe=([0-9a-fA-F]+)")
 
 MAX_WORKERS = 10
-CIRCUIT_BREAKER_RATIO = 0.45  # 单轮里失效比例超过这个阈值, 判定为网络/CDN 被限流而非真过期
+CIRCUIT_BREAKER_RATIO = 0.45  # 单轮无法判断的比例超过此阈值时暂停修复
 CHECK_TIMEOUT = 8
 OE_PREFILTER_BUFFER = 3600  # oe= 过期时间超过这个缓冲(秒)以外的链接, 跳过本轮存活检测
 
@@ -113,7 +115,7 @@ def check_url_liveness(url, timeout=CHECK_TIMEOUT):
             status = getattr(resp, "status", None) or resp.getcode()
             return 200 <= status < 300 or status == 206
     except urllib.error.HTTPError as e:
-        return e.code not in (403, 404, 410)
+        return False if e.code in (403, 404, 410) else None
     except Exception:
         return None
 
@@ -134,16 +136,30 @@ def save_products_to(products, path):
 def acquire_lock():
     """防止上一轮还没跑完时被下一次 timer 触发重叠执行。systemd 对同一个 oneshot 服务
     单元本身就不会并发起两个实例, 这里的文件锁是双保险, 也方便手动测试时不会跟 timer 撞车。
-    锁文件特意放仓库目录之外(RuntimeDirectory 或 /tmp), 避免被 git add -A 误提交。"""
-    lock_dir = os.environ.get("RUNTIME_DIRECTORY") or "/tmp"
-    lock_path = os.path.join(lock_dir, "fb-image-check.lock")
-    fh = open(lock_path, "a+")
+    锁文件特意放仓库目录之外, 避免被 git add -A 误提交。"""
+    # 手动运行和 systemd 必须使用同一路径；不同仓库各用各的锁。
+    repo_id = hashlib.sha256(os.path.realpath(HERE).encode()).hexdigest()[:16]
+    lock_path = os.path.join("/tmp", "fb-image-check-%s.lock" % repo_id)
+    locks = ExitStack()
+    # 兼容更新前已经启动的进程，它可能还拿着旧版锁。
+    paths = [lock_path]
+    for old_dir in ("/tmp", os.environ.get("RUNTIME_DIRECTORY"), "/run/fb-image-check"):
+        old_path = os.path.join(old_dir, "fb-image-check.lock") if old_dir else None
+        if old_path and os.path.exists(old_path) and old_path not in paths:
+            paths.append(old_path)
     try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        print("fb-image-check: 已有一轮在跑(锁文件 %s), 本次跳过" % lock_path)
-        sys.exit(0)
-    return fh
+        for path in paths:
+            fh = locks.enter_context(open(path, "a+"))
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("fb-image-check: 已有一轮在跑(锁文件 %s), 本次跳过" % path)
+                locks.close()
+                sys.exit(0)
+    except BaseException:
+        locks.close()
+        raise
+    return locks
 
 
 def run(products_path=None, dry_run=False):
@@ -156,6 +172,8 @@ def run(products_path=None, dry_run=False):
                 candidates.append((pi, ii, u))
 
     to_check = [c for c in candidates if needs_live_check(c[2])]
+    print("fb-image-check: 商品=%d FB图片=%d 待检测=%d"
+          % (len(products), len(candidates), len(to_check)), flush=True)
 
     results = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
@@ -166,6 +184,8 @@ def run(products_path=None, dry_run=False):
                 results[url] = fut.result()
             except Exception:
                 results[url] = None
+            if len(results) % 100 == 0:
+                print("fb-image-check: 已检测 %d 个不同链接" % len(results), flush=True)
 
     checked = len(to_check)
     broken_count = sum(1 for v in results.values() if v is False)
@@ -197,6 +217,7 @@ def run(products_path=None, dry_run=False):
     for pi, items in broken_by_product.items():
         p = products[pi]
         name = p.get("name") or "?"
+        print("fb-image-check: 重新抓取商品 %r，失效图片=%d" % (name, len(items)), flush=True)
         buy = (p.get("buy") or "").strip()
 
         if not buy:
@@ -221,10 +242,10 @@ def run(products_path=None, dry_run=False):
         for ii, old_url in items:
             pid = extract_photo_id(old_url)
             new_url = fresh_map.get(pid) if pid else None
-            if not new_url:
+            if not new_url or new_url == old_url or check_url_liveness(new_url) is not True:
                 unresolved_total += 1
                 unresolved_lines.append(
-                    'fb-image-check: UNRESOLVED product=%r buy=%s reason="photo id %s not found in fresh scrape"'
+                    'fb-image-check: UNRESOLVED product=%r buy=%s reason="photo id %s has no verified fresh URL"'
                     % (name, buy, pid or old_url))
                 continue
             if ii < len(imgs) and imgs[ii] == old_url:
