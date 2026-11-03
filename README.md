@@ -87,3 +87,24 @@ GIT = {
   ```
 
   装好后 `bash run.sh` 会自动优先用 `.venv` 里的 Python。首次使用前，去后台「⚙ 网站设置 → Facebook 登录」点一次「登录 Facebook」，在弹出的浏览器窗口里登录后关闭即可，登录态会保存在本地 `.fb_browser_profile/`（不会被提交到 git）。
+
+
+## 无头设备通过 SSH 登录 Facebook
+
+无需安装桌面或 VNC。先安装上面的 Playwright 和 Chromium，使用运行修复任务的同一个系统用户（不要加 sudo）：
+
+```bash
+./fb-login.sh
+```
+
+工具会自动检测当前系统用户名和设备 IP，并打印完整 SSH 命令（通过 SSH 启动时优先沿用连接地址与端口）。保持该终端运行，在电脑另开终端复制工具打印的命令，无需手填。也可先执行 `./fb-login.sh --connection-info` 只查看命令。下面为命令格式：
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:9222:127.0.0.1:9222 ethan@设备地址
+```
+
+电脑 Chrome 打开 `chrome://inspect/#devices`，勾选 **Discover network targets**，点击 **Configure** 添加 `localhost:9222`。找到 Facebook 页点击 **inspect**，在 DevTools 中打开 **Toggle screencast**（画面按钮），在显示的页面里完成登录和验证。
+
+确认登录后，在运行 `fb-login.sh` 的终端按 Ctrl+C，正常关闭浏览器并保存会话，然后关闭 SSH 转发。登录并不会自动发布商品，使用 `./fix.sh --dry-run` 验证后可执行 `./fix.sh` 修复并发布。
+
+调试端口只监听本机，最多开放 30 分钟。可用 `./fb-login.sh --port 9223` 更改端口，SSH 转发和 Chrome 配置也需同步修改。登录期间不要启动其他使用 `.fb_browser_profile/` 的浏览器；若定时修复正在运行，先等待结束。该目录包含真实会话，继续保持 git 忽略。

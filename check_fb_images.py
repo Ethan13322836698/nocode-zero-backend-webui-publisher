@@ -236,17 +236,62 @@ def run(products_path=None, dry_run=False):
             continue
 
         fresh_map = build_photo_id_map(result.get("imgs"))
+        if result.get("browser_error"):
+            print("fb-image-check: 浏览器提示: %s" % result["browser_error"], flush=True)
         imgs = server.product_imgs(p)
         product_fixed = 0
+
+        # 照片被重新上传或换图后 ID 会改变；确认同一商品后可更新当前图集。
+        identity = result.get("browser_listing") or {}
+        normalize = lambda s: " ".join((s or "").split()).casefold()
+        fresh = result.get("imgs") or []
+        unmatched = any(extract_photo_id(u) not in fresh_map for _, u in items)
+        fb_count = sum(is_fb_cdn_url(u) for u in imgs)
+        gallery_verified = (identity.get("listing_id") == server._fb_item_id(buy)
+                            and normalize(identity.get("listing_name")) == normalize(name)
+                            and identity.get("gallery_stable")
+                            and (len(fresh) >= 2 or fb_count == 1)
+                            and all(is_fb_cdn_url(u) for u in fresh))
+        if unmatched and identity.get("listing_name") and normalize(identity["listing_name"]) != normalize(name):
+            print("fb-image-check: 商品标题不一致，需核对原 buy 链接：本地=%r，Facebook当前=%r；不替换图集"
+                  % (name, identity["listing_name"]), flush=True)
+        if unmatched and gallery_verified and fresh:
+            live = [check_url_liveness(u) for u in fresh]
+            if all(value is True for value in live):
+                # 保留本地图片和其他外链，将原 FB 图片段替换为当前商品图集。
+                updated, inserted = [], False
+                for u in imgs:
+                    if is_fb_cdn_url(u):
+                        if not inserted:
+                            updated.extend(fresh)
+                            inserted = True
+                    else:
+                        updated.append(u)
+                p["imgs"] = updated
+                p["img"] = updated[0]
+                fixed_total += len(items)
+                products_touched += 1
+                print("fb-image-check: 同一商品当前图集验证通过，%s %d → %d 张 FB 图片，消除 %d 张失效图"
+                      % ("预计更新" if dry_run else "更新", fb_count, len(fresh), len(items)), flush=True)
+                continue
 
         for ii, old_url in items:
             pid = extract_photo_id(old_url)
             new_url = fresh_map.get(pid) if pid else None
-            if not new_url or new_url == old_url or check_url_liveness(new_url) is not True:
+            reason = None
+            if not new_url:
+                reason = "照片 ID 未出现在抓取结果中 (抓到 %d 张图片)" % len(result.get("imgs") or [])
+            elif new_url == old_url:
+                reason = "抓取结果仍是旧链接"
+            else:
+                live = check_url_liveness(new_url)
+                if live is not True:
+                    reason = "新链接已失效" if live is False else "新链接验证遇到网络错误，暂不替换"
+            if reason:
                 unresolved_total += 1
                 unresolved_lines.append(
-                    'fb-image-check: UNRESOLVED product=%r buy=%s reason="photo id %s has no verified fresh URL"'
-                    % (name, buy, pid or old_url))
+                    'fb-image-check: UNRESOLVED product=%r buy=%s photo_id=%s reason=%r'
+                    % (name, buy, pid or "unknown", reason))
                 continue
             if ii < len(imgs) and imgs[ii] == old_url:
                 imgs[ii] = new_url

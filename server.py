@@ -1012,13 +1012,15 @@ def browser_login_facebook():
 
 _CAROUSEL_JS = """
 els => {
-  // 商品自己的轮播图每张都用同一个 alt 文案(标题); 页面下方"你可能也喜欢"的推荐
-  // 商品卡片各有各的 alt(各自的商品名)。按 alt 分组, 取图片最多的那组, 就是轮播图,
-  // 不会混进推荐区的图。
+  // 必须匹配商品标题，并排除推荐商品链接，不能仅取数量最多的一组。
+  const titles = [...document.querySelectorAll('h1')].map(e => e.innerText.trim())
+    .filter(t => t && t.toLowerCase() !== 'marketplace');
+  if (!titles.length) return [];
   const groups = {};
   for (const el of els) {
     const alt = (el.alt || '').trim();
-    if (!alt) continue;
+    if (!alt || !titles.some(t => alt.includes(t))) continue;
+    if (el.closest("a[href*='/marketplace/item/']")) continue;
     (groups[alt] = groups[alt] || []).push(el.src);
   }
   let best = [];
@@ -1035,8 +1037,10 @@ def browser_extract_listing(url, timeout_ms=20000):
     完整图片轮播 + 价格(登录后页面是 JS 壳, 这两项都要等 JS 跑完才会出现在 DOM/文本里)。
     未安装 playwright 或未登录过时, 静默返回全空(上层原样保留 HTTP 抓取的结果)。"""
     sync_playwright = _playwright_sync()
-    if not sync_playwright or not os.path.isdir(FB_PROFILE_DIR):
-        return {"imgs": [], "price": None, "sym": None}
+    if not sync_playwright:
+        return {"imgs": [], "price": None, "sym": None, "error": "未安装 Playwright，请使用项目 .venv 并安装 requirements.txt"}
+    if not os.path.isdir(FB_PROFILE_DIR) or not os.listdir(FB_PROFILE_DIR):
+        return {"imgs": [], "price": None, "sym": None, "error": "本机没有 Facebook 浏览器登录态，请在后台设置中登录 Facebook"}
     try:
         with sync_playwright() as p:
             ctx = p.chromium.launch_persistent_context(FB_PROFILE_DIR, headless=True)
@@ -1046,18 +1050,40 @@ def browser_extract_listing(url, timeout_ms=20000):
                 # (埋点/长轮询), networkidle 经常要等到超时才返回; 读 img.src/文本不需要
                 # 图真的下载完, 只要 DOM 渲染出来就行。
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                if "/login" in page.url or "/checkpoint" in page.url:
+                    return {"imgs": [], "price": None, "sym": None, "error": "Facebook 登录失效或需要验证，请在后台重新登录"}
                 try:
                     page.wait_for_selector("img[src*='scontent']", timeout=8000)
                 except Exception:
                     pass  # 没等到也继续按现状读一次, 好过直接判定失败
-                srcs = page.eval_on_selector_all("img[src*='scontent']", _CAROUSEL_JS)
+                # 等待真实商品图集稳定，避免只读到首屏封面或加载中的推荐区。
+                srcs, previous, stable = [], None, 0
+                for _ in range(10):
+                    srcs = page.eval_on_selector_all("img[src*='scontent']", _CAROUSEL_JS)
+                    signature = tuple(_dedup_photo_urls(srcs))
+                    stable = stable + 1 if signature and signature == previous else 0
+                    previous = signature
+                    if stable >= 3:
+                        break
+                    page.wait_for_timeout(750)
+                heading = page.locator("h1").all_text_contents()
+                listing_name = next((t.strip() for t in heading if t.strip().lower() != "marketplace"), "")
+                listing_id = _fb_item_id(page.url)
                 body_text = page.inner_text("body")
             finally:
                 ctx.close()
         price, sym = _find_price(body_text)  # 页面正文里第一处价格 = 商品自己的价格
-        return {"imgs": _dedup_photo_urls(srcs), "price": price, "sym": sym}
-    except Exception:
-        return {"imgs": [], "price": None, "sym": None}
+        imgs = _dedup_photo_urls(srcs)
+        if not listing_name or listing_id != _fb_item_id(url):
+            return {"imgs": [], "price": None, "sym": None,
+                    "error": "未进入指定商品详情页（可能已下架、无权访问或被重定向到 Marketplace 首页），不能用推荐图片修复"}
+        return {"imgs": imgs, "price": price, "sym": sym,
+                "listing_name": listing_name, "listing_id": listing_id,
+                "gallery_stable": stable >= 3,
+                "error": "" if imgs else "浏览器没有提取到商品图片，请检查登录状态、商品是否可访问或页面结构是否变化"}
+    except Exception as e:
+        return {"imgs": [], "price": None, "sym": None,
+                "error": "Facebook 浏览器抓取失败 (%s)，请检查 Chromium 安装、登录窗口是否占用配置目录及网络" % type(e).__name__}
 
 
 def _decent_desc(t, skip_text=""):
@@ -1244,12 +1270,15 @@ def scrape_marketplace(url, cookie=None):
         if not result.get("diag"):
             result["diag"] = parsed.get("diag") or {}
 
-    if not parses:
+    # 匿名页面要求登录时仍要尝试浏览器，不能提前返回而跳过真实登录态。
+    browser_data = browser_extract_listing(buy)
+    if not parses and not browser_data.get("imgs"):
+        browser_error = browser_data.get("error") or "浏览器未提取到图片"
         if last_err:
-            return {"ok": False, "error": "无法访问链接（网络或代理异常）：" + last_err}
+            return {"ok": False, "error": "无法访问链接（网络或代理异常）：" + last_err + "；" + browser_error}
         if got_login:
-            return {"ok": False, "error": "Facebook 要求登录，此商品无法自动提取。请手动填写，或换用可公开访问的链接。"}
-        return {"ok": False, "error": "未能从链接提取到商品信息，链接可能已失效或页面结构已变更。"}
+            return {"ok": False, "error": "Facebook 要求登录；" + browser_error}
+        return {"ok": False, "error": "未能从链接提取到商品信息；" + browser_error}
 
     # 图片: 按「照片ID」去重合并(同名不同尺寸只保留一张)
     seen_ids = set()
@@ -1271,9 +1300,12 @@ def scrape_marketplace(url, cookie=None):
 
     # 图片 + 价格: 若有登录过的浏览器, 用它渲染出真实页面读取(这两项匿名 HTML 抓不到,
     # 图片会整体替换掉只有一张封面图的结果; 价格拿到才覆盖, 拿不到就保留上面 HTTP 抓的)。
-    browser_data = browser_extract_listing(buy)
+    if browser_data.get("error"):
+        result["browser_error"] = browser_data["error"]
     if browser_data.get("imgs"):
         result["imgs"] = browser_data["imgs"]
+        result["browser_listing"] = {k: browser_data.get(k) for k in
+                                     ("listing_name", "listing_id", "gallery_stable")}
     if browser_data.get("price"):
         result["price"] = browser_data["price"]
         result["sym"] = browser_data.get("sym") or result["sym"]

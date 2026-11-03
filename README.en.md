@@ -125,3 +125,16 @@ From **Settings** in the WebUI, without touching code:
   `bash run.sh` automatically prefers `.venv`'s Python once it exists. Before first use, open admin → **⚙ Settings → Facebook login** and click "Log in to Facebook" once — log in in the browser window that opens, then close it. The session is saved locally in `.fb_browser_profile/` (never committed to git).
 
 *Free forever on GitHub Pages. Nothing else to install or pay for.*
+
+
+## Facebook login on a headless device
+
+With Playwright and Chromium installed, run `./fb-login.sh` as the same system user as the repair job (without sudo). The tool detects the current username and device IP and prints a complete SSH command; copy it into a second terminal on your computer. Existing SSH connection addresses and ports take priority. Use `./fb-login.sh --connection-info` to preview the command without starting Chromium. Command format:
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:9222:127.0.0.1:9222 USER@DEVICE
+```
+
+Open `chrome://inspect/#devices` in desktop Chrome, enable **Discover network targets**, and add `localhost:9222` under **Configure**. Click **inspect** for the Facebook tab, enable **Toggle screencast**, and log in through the displayed page. Press Ctrl+C in the device's login terminal to close Chromium and save the session, then close the SSH tunnel. Run `./fix.sh --dry-run` to verify before publishing with `./fix.sh`.
+
+The debug endpoint listens on loopback only and closes after 30 minutes. Use `./fb-login.sh --port 9223` for another port and update the tunnel and Chrome configuration accordingly. Wait for any active repair job and close other Facebook login windows before starting. The existing ignored `.fb_browser_profile/` stores the session; login does not publish products.
