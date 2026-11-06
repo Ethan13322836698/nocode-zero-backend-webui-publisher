@@ -1,9 +1,8 @@
 [Unit]
-Description=Run fb-image-check every 10 minutes
+Description=Check and repair expired Facebook images daily
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
+OnCalendar=*-*-* 03:00:00
 Persistent=true
 
 [Install]
